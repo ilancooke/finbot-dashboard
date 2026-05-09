@@ -1,0 +1,19 @@
+[project]
+name = "finbot-dashboard"
+version = "0.1.0"
+description = "A lightweight read-only Streamlit dashboard for Finbot catalog and market data."
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit",
+    "pandas",
+    "pyarrow",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
