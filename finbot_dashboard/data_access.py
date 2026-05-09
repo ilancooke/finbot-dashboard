@@ -145,6 +145,24 @@ def find_ticker_row(tickers: pd.DataFrame, ticker: str) -> pd.Series | None:
     return matches.iloc[0]
 
 
+def find_latest_ticker_row(
+    frame: pd.DataFrame,
+    ticker: str,
+    date_column: str = "date",
+) -> pd.Series | None:
+    if frame.empty or "ticker" not in frame.columns or not ticker:
+        return None
+
+    matches = frame.loc[frame["ticker"].fillna("").astype(str).str.upper() == ticker.upper()].copy()
+    if matches.empty:
+        return None
+
+    if date_column in matches.columns:
+        matches["_sort_date"] = pd.to_datetime(matches[date_column], errors="coerce")
+        matches = matches.sort_values("_sort_date", ascending=False, na_position="last")
+    return matches.iloc[0].drop(labels=["_sort_date"], errors="ignore")
+
+
 def filter_daily_bars_by_ticker(daily_bars: pd.DataFrame, ticker: str) -> pd.DataFrame:
     if daily_bars.empty or not ticker:
         return pd.DataFrame(columns=daily_bars.columns)

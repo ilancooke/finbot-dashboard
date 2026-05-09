@@ -8,6 +8,7 @@ from finbot_dashboard.data_access import (
     catalog_path,
     filter_daily_bars_by_ticker,
     filter_tickers,
+    find_latest_ticker_row,
     load_catalog,
     read_dataset,
     resolve_data_root,
@@ -128,3 +129,18 @@ def test_filter_daily_bars_by_ticker_filters_case_insensitively_and_sorts_dates(
 
     assert result["close"].tolist() == [1.0, 2.0]
     assert str(result.loc[0, "date"].date()) == "2026-05-01"
+
+
+def test_find_latest_ticker_row_returns_newest_ratio_record() -> None:
+    ratios = pd.DataFrame(
+        [
+            {"date": "2026-05-01", "ticker": "AAPL", "price_to_earnings": 30.0},
+            {"date": "2026-05-07", "ticker": "aapl", "price_to_earnings": 34.44},
+            {"date": "2026-05-07", "ticker": "MSFT", "price_to_earnings": 24.96},
+        ]
+    )
+
+    result = find_latest_ticker_row(ratios, "AAPL")
+
+    assert result is not None
+    assert result["price_to_earnings"] == 34.44

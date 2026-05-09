@@ -10,7 +10,7 @@ The dashboard reads the shared Finbot data root, uses the catalog produced by `f
 - Shows catalog health for known and future datasets
 - Reads parquet files referenced by the catalog when needed
 - Provides ticker search from `reference.tickers`
-- Shows basic stock metadata, a close-price chart, recent OHLCV rows, optional ticker details, and optional related tickers
+- Shows basic stock metadata, a close-price chart, recent OHLCV rows, optional latest ratios, optional ticker details, and optional related tickers
 - Uses short Streamlit cache TTLs so refreshed data becomes visible without rebuilding or restarting the container
 
 ## What It Does Not Do
@@ -42,6 +42,14 @@ The dashboard expects `finbot-catalog` to write:
 - `$FINBOT_DATA_ROOT/catalog/dataset_catalog.json`
 
 The parquet catalog is used by the app. Dataset paths inside the catalog may be relative to `FINBOT_DATA_ROOT` or absolute.
+
+Stock detail uses these catalog dataset names when present:
+
+- `market.daily_bars.historical`
+- `ratios.ratios`
+- `reference.tickers`
+- `reference.ticker_details`
+- `reference.related_tickers`
 
 ## Local Run
 
@@ -94,4 +102,4 @@ When `finbot-catalog` or another data process refreshes files under the shared d
 pytest
 ```
 
-The tests cover data root resolution, catalog loading, catalog path resolution, missing catalog behavior, ticker filtering, daily bar filtering, and graceful handling of optional unavailable datasets.
+The tests cover data root resolution, catalog loading, catalog path resolution, missing catalog behavior, ticker filtering, daily bar filtering, latest ratio row selection, and graceful handling of optional unavailable datasets.

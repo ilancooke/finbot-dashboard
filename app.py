@@ -11,6 +11,7 @@ from finbot_dashboard.data_access import (
     catalog_path,
     filter_daily_bars_by_ticker,
     filter_tickers,
+    find_latest_ticker_row,
     find_ticker_row,
     load_catalog,
     read_dataset,
@@ -21,7 +22,23 @@ TICKERS_DATASET = "reference.tickers"
 DETAILS_DATASET = "reference.ticker_details"
 RELATED_DATASET = "reference.related_tickers"
 DAILY_BARS_DATASET = "market.daily_bars.historical"
+RATIOS_DATASET = "ratios.ratios"
 CACHE_TTL_SECONDS = int(os.environ.get("FINBOT_DASHBOARD_CACHE_TTL_SECONDS", "120"))
+PERCENT_RATIO_FIELDS = {
+    "dividend_yield",
+    "return_on_assets",
+    "return_on_equity",
+}
+MONEY_RATIO_FIELDS = {
+    "price",
+    "market_cap",
+    "earnings_per_share",
+    "enterprise_value",
+    "free_cash_flow",
+}
+COMPACT_RATIO_FIELDS = {
+    "average_volume",
+}
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
@@ -54,6 +71,7 @@ def main() -> None:
     details = cached_dataset(str(data_root), catalog_records, DETAILS_DATASET)
     related = cached_dataset(str(data_root), catalog_records, RELATED_DATASET)
     daily_bars = cached_dataset(str(data_root), catalog_records, DAILY_BARS_DATASET)
+    ratios = cached_dataset(str(data_root), catalog_records, RATIOS_DATASET)
 
     selected_ticker = ticker_selector(tickers)
 
@@ -63,7 +81,7 @@ def main() -> None:
     with lookup_tab:
         render_stock_lookup(tickers, selected_ticker)
     with detail_tab:
-        render_stock_detail(selected_ticker, tickers, details, related, daily_bars)
+        render_stock_detail(selected_ticker, tickers, details, related, daily_bars, ratios)
 
 
 def ticker_selector(tickers: pd.DataFrame) -> str | None:
@@ -147,6 +165,7 @@ def render_stock_detail(
     details: pd.DataFrame,
     related: pd.DataFrame,
     daily_bars: pd.DataFrame,
+    ratios: pd.DataFrame,
 ) -> None:
     st.subheader("Stock Detail")
     if not selected_ticker:
@@ -163,6 +182,7 @@ def render_stock_detail(
     else:
         render_price_history(ticker_bars)
 
+    render_latest_ratios(ratios, selected_ticker)
     render_ticker_details(details, selected_ticker)
     render_related_tickers(related, selected_ticker)
 
@@ -211,6 +231,46 @@ def render_ticker_details(details: pd.DataFrame, ticker: str) -> None:
     render_fields(row, fields)
 
 
+def render_latest_ratios(ratios: pd.DataFrame, ticker: str) -> None:
+    st.markdown("#### Latest Ratios")
+    row = find_latest_ticker_row(ratios, ticker)
+    if row is None:
+        st.info("No ratios are available for this symbol.")
+        return
+
+    date = ratio_value(row, "date")
+    price = ratio_value(row, "price")
+    st.caption(f"Ratio date: {date} | Price: {price}")
+
+    valuation_fields = [
+        ("Market Cap", "market_cap"),
+        ("P/E", "price_to_earnings"),
+        ("P/B", "price_to_book"),
+        ("P/S", "price_to_sales"),
+        ("EV/Sales", "ev_to_sales"),
+        ("EV/EBITDA", "ev_to_ebitda"),
+    ]
+    profitability_fields = [
+        ("EPS", "earnings_per_share"),
+        ("Dividend Yield", "dividend_yield"),
+        ("ROA", "return_on_assets"),
+        ("ROE", "return_on_equity"),
+        ("Free Cash Flow", "free_cash_flow"),
+    ]
+    liquidity_fields = [
+        ("Debt/Equity", "debt_to_equity"),
+        ("Current", "current"),
+        ("Quick", "quick"),
+        ("Cash", "cash"),
+        ("Average Volume", "average_volume"),
+    ]
+
+    render_ratio_fields(row, valuation_fields)
+    with st.expander("Profitability and liquidity ratios", expanded=False):
+        render_ratio_fields(row, profitability_fields)
+        render_ratio_fields(row, liquidity_fields)
+
+
 def render_related_tickers(related: pd.DataFrame, ticker: str) -> None:
     st.markdown("#### Related Tickers")
     if related.empty or "ticker" not in related.columns or "related_ticker" not in related.columns:
@@ -232,6 +292,12 @@ def render_fields(row: pd.Series, fields: list[tuple[str, str]]) -> None:
         cols[index % 4].metric(label, value(row, key))
 
 
+def render_ratio_fields(row: pd.Series, fields: list[tuple[str, str]]) -> None:
+    cols = st.columns(4)
+    for index, (label, key) in enumerate(fields):
+        cols[index % 4].metric(label, ratio_value(row, key))
+
+
 def value(row: pd.Series | None, key: str) -> str:
     if row is None or key not in row:
         return "N/A"
@@ -241,6 +307,36 @@ def value(row: pd.Series | None, key: str) -> str:
     if isinstance(item, float):
         return f"{item:,.2f}"
     return str(item)
+
+
+def ratio_value(row: pd.Series | None, key: str) -> str:
+    if row is None or key not in row:
+        return "N/A"
+    item = row[key]
+    if pd.isna(item):
+        return "N/A"
+    if key == "date":
+        parsed = pd.to_datetime(item, errors="coerce")
+        if pd.isna(parsed):
+            return str(item)
+        return str(parsed.date())
+    if key in PERCENT_RATIO_FIELDS:
+        return f"{float(item) * 100:,.2f}%"
+    if key in MONEY_RATIO_FIELDS:
+        return compact_number(float(item), prefix="$")
+    if key in COMPACT_RATIO_FIELDS:
+        return compact_number(float(item))
+    if isinstance(item, int | float):
+        return f"{item:,.2f}"
+    return str(item)
+
+
+def compact_number(number: float, prefix: str = "") -> str:
+    absolute = abs(number)
+    for suffix, divisor in [("T", 1_000_000_000_000), ("B", 1_000_000_000), ("M", 1_000_000), ("K", 1_000)]:
+        if absolute >= divisor:
+            return f"{prefix}{number / divisor:,.2f}{suffix}"
+    return f"{prefix}{number:,.2f}"
 
 
 def ticker_label(matches: pd.DataFrame, ticker: str) -> str:
