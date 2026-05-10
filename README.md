@@ -1,55 +1,61 @@
 # finbot-dashboard
 
-A lightweight, read-only Streamlit dashboard for the Finbot project.
+A read-only Streamlit dashboard for local Finbot stock research.
 
-The dashboard reads the shared Finbot data root, uses the catalog produced by `finbot-catalog` as its source of truth, and displays dataset health plus stock-specific reference and daily bar data.
+The app reads only local parquet datasets and the catalog under `FINBOT_DATA_ROOT`. It does
+not call external APIs, scrape websites, download data, mutate datasets, compute training
+features, or orchestrate jobs.
 
-## What It Does
+## Purpose
 
-- Loads `$FINBOT_DATA_ROOT/catalog/dataset_catalog.parquet`
-- Shows catalog health for known and future datasets
-- Reads parquet files referenced by the catalog when needed
-- Provides ticker search from `reference.tickers`
-- Shows basic stock metadata, a close-price chart, recent OHLCV rows, optional latest ratios, optional ticker details, and optional related tickers
-- Uses short Streamlit cache TTLs so refreshed data becomes visible without rebuilding or restarting the container
+This dashboard is a useful v1 for answering:
 
-## What It Does Not Do
+- What is this company?
+- How has the stock price performed?
+- Is the business growing?
+- Is the business profitable?
+- Is the stock expensive or cheap relative to related tickers?
+- Is the data fresh and complete enough to trust?
 
-- It does not copy, move, or own raw datasets
-- It does not download data or call external APIs
-- It does not compute features, train models, or orchestrate jobs
-- It does not require a database, DuckDB, FastAPI, or authentication
+## Pages
 
-## Expected Layout
+- **Overview**: company profile, description, key valuation/profitability KPI cards, and a
+  compact recent close-price chart.
+- **Price Trends**: close price, volume, and indexed comparison against related tickers.
+- **Financials**: statement trends for revenue, profitability, cash flow, cash, total debt,
+  and temporary derived margins.
+- **Valuation**: current point-in-time ratio snapshot for the selected ticker.
+- **Peers**: related ticker list, peer comparison table, and indexed peer price chart.
+- **Data Quality**: catalog records plus local file-existence checks for expected datasets.
+
+## Expected Data Layout
 
 ```text
 finbot/
 ├── data/
+│   ├── catalog/
+│   │   ├── dataset_catalog.parquet
+│   │   └── dataset_catalog.json
+│   ├── financials/
+│   │   ├── balance_sheets.parquet
+│   │   ├── cash_flow_statements.parquet
+│   │   └── income_statements.parquet
 │   ├── market/
-│   ├── reference/
-│   ├── features/
-│   ├── models/
-│   └── catalog/
+│   │   └── daily_bars/
+│   │       └── historical.parquet
+│   ├── ratios/
+│   │   └── ratios.parquet
+│   └── reference/
+│       ├── related_tickers.parquet
+│       ├── ticker_details.parquet
+│       └── tickers.parquet
 └── repos/
-    ├── finbot-data/
-    ├── finbot-catalog/
     └── finbot-dashboard/
 ```
 
-The dashboard expects `finbot-catalog` to write:
-
-- `$FINBOT_DATA_ROOT/catalog/dataset_catalog.parquet`
-- `$FINBOT_DATA_ROOT/catalog/dataset_catalog.json`
-
-The parquet catalog is used by the app. Dataset paths inside the catalog may be relative to `FINBOT_DATA_ROOT` or absolute.
-
-Stock detail uses these catalog dataset names when present:
-
-- `market.daily_bars.historical`
-- `ratios.ratios`
-- `reference.tickers`
-- `reference.ticker_details`
-- `reference.related_tickers`
+The app prefers catalog paths from `catalog/dataset_catalog.parquet`. If a dataset is not
+listed in the catalog, it falls back to the expected v1 paths above so the Data Quality page
+can still explain what exists locally.
 
 ## Local Run
 
@@ -58,12 +64,13 @@ From this repository:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e ".[dev]"
 export FINBOT_DATA_ROOT=/path/to/finbot/data
 streamlit run app.py
 ```
 
-If `FINBOT_DATA_ROOT` is not set, the app tries to infer the standard local layout where this repo lives at `finbot/repos/finbot-dashboard` and data lives at `finbot/data`.
+If `FINBOT_DATA_ROOT` is not set, the app tries to infer the standard local layout where this
+repo lives at `finbot/repos/finbot-dashboard` and data lives at `finbot/data`.
 
 ## Docker Run
 
@@ -82,19 +89,46 @@ docker run --rm \
   finbot-dashboard
 ```
 
-Inside Docker, `FINBOT_DATA_ROOT` defaults to `/data`. The image contains app code only; data is supplied by the mounted host directory.
+Inside Docker, `FINBOT_DATA_ROOT` defaults to `/data`. The image contains app code only; data
+is supplied by the mounted host directory.
 
 ## Data Refresh
 
-The app is read-only and uses `st.cache_data` with a short TTL. By default, cached file reads expire after 120 seconds.
-
-To change the TTL:
+The app uses `st.cache_data` for local dataframe reads. By default, cached reads expire after
+120 seconds:
 
 ```bash
 export FINBOT_DASHBOARD_CACHE_TTL_SECONDS=60
 ```
 
-When `finbot-catalog` or another data process refreshes files under the shared data root, the dashboard sees the new catalog and parquet files after the cache expires. The dashboard container does not need to be rebuilt or restarted for normal data refreshes.
+After `finbot-data` writes new parquet files and `finbot-catalog` rebuilds the catalog, the
+dashboard sees the refreshed data after the cache expires. The dashboard container does not
+need to be rebuilt or restarted for normal data refreshes.
+
+## Code Layout
+
+- `app.py`: Streamlit navigation shell and page renderers.
+- `finbot_dashboard/data_loader.py`: data-root resolution, catalog loading, parquet reads,
+  ticker/date filtering, and data-quality records.
+- `finbot_dashboard/metrics.py`: temporary derived calculations used by the dashboard.
+- `finbot_dashboard/formatting.py`: display formatting helpers.
+- `finbot_dashboard/charts.py`: Streamlit chart wrappers.
+- `finbot_dashboard/ui.py`: shared sidebar and reusable UI components.
+
+Financial formulas belong in `metrics.py`, not in Streamlit page functions. This keeps the
+temporary calculation layer easy to move into a future `finbot-features` package.
+
+## Known Limitations
+
+- Peer mode only uses `reference.related_tickers`.
+- Ratios are displayed as a snapshot because the current `ratios.ratios` dataset is
+  point-in-time.
+- Peer valuation quality depends on which related tickers are present in the local ratios,
+  financials, and daily bars datasets.
+- Financial statement datasets can contain partial ticker coverage and mixed quarterly or
+  annual rows; missing values are shown rather than invented.
+- The dashboard does not create datasets. Rebuild the catalog after data-producing packages
+  add or materially change local parquet files.
 
 ## Tests
 
@@ -102,4 +136,7 @@ When `finbot-catalog` or another data process refreshes files under the shared d
 pytest
 ```
 
-The tests cover data root resolution, catalog loading, catalog path resolution, missing catalog behavior, ticker filtering, daily bar filtering, latest ratio row selection, and graceful handling of optional unavailable datasets.
+The tests cover data-root resolution, catalog loading, catalog path resolution, missing
+dataset behavior, ticker filtering, daily bar filtering, latest-row selection, safe math,
+derived financial metrics, indexed price normalization, and peer comparison fallbacks.
+

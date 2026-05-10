@@ -1,7 +1,7 @@
 [project]
 name = "finbot-dashboard"
 version = "0.1.0"
-description = "A lightweight read-only Streamlit dashboard for Finbot catalog and market data."
+description = "A read-only Streamlit dashboard for local Finbot stock research."
 requires-python = ">=3.11"
 dependencies = [
     "streamlit",

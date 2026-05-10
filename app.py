@@ -1,362 +1,432 @@
 from __future__ import annotations
 
-import os
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-from finbot_dashboard.data_access import (
-    CATALOG_COLUMNS,
-    catalog_path,
+from finbot_dashboard import charts
+from finbot_dashboard.config import (
+    BALANCE_DATASET,
+    CASH_FLOW_DATASET,
+    DAILY_BARS_DATASET,
+    DETAILS_DATASET,
+    INCOME_DATASET,
+    RATIOS_DATASET,
+    RELATED_DATASET,
+    TICKERS_DATASET,
+)
+from finbot_dashboard.data_loader import (
+    build_data_quality_frame,
     filter_daily_bars_by_ticker,
-    filter_tickers,
-    find_latest_ticker_row,
+    filter_date_range,
     find_ticker_row,
     load_catalog,
+    load_catalog_json,
     read_dataset,
+    related_ticker_list,
     resolve_data_root,
 )
-
-TICKERS_DATASET = "reference.tickers"
-DETAILS_DATASET = "reference.ticker_details"
-RELATED_DATASET = "reference.related_tickers"
-DAILY_BARS_DATASET = "market.daily_bars.historical"
-RATIOS_DATASET = "ratios.ratios"
-CACHE_TTL_SECONDS = int(os.environ.get("FINBOT_DASHBOARD_CACHE_TTL_SECONDS", "120"))
-PERCENT_RATIO_FIELDS = {
-    "dividend_yield",
-    "return_on_assets",
-    "return_on_equity",
-}
-MONEY_RATIO_FIELDS = {
-    "price",
-    "market_cap",
-    "earnings_per_share",
-    "enterprise_value",
-    "free_cash_flow",
-}
-COMPACT_RATIO_FIELDS = {
-    "average_volume",
-}
+from finbot_dashboard.formatting import (
+    format_currency,
+    format_percent,
+    format_plain,
+    format_ratio,
+    is_missing,
+)
+from finbot_dashboard.metrics import (
+    build_peer_comparison,
+    indexed_price_frame,
+    latest_ratio_snapshot,
+    prepare_financial_trends,
+)
+from finbot_dashboard.ui import SidebarState, render_kpi_cards, render_key_value_grid, render_sidebar
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-def cached_catalog(data_root: str) -> pd.DataFrame:
-    return load_catalog(data_root)
-
-
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-def cached_dataset(data_root: str, catalog_records: tuple[tuple[object, ...], ...], dataset_name: str) -> pd.DataFrame:
-    catalog = pd.DataFrame.from_records(catalog_records, columns=CATALOG_COLUMNS)
-    return read_dataset(catalog, dataset_name, data_root)
+@dataclass(frozen=True)
+class AppData:
+    data_root: Path
+    catalog: pd.DataFrame
+    catalog_json: list[dict[str, object]]
+    tickers: pd.DataFrame
+    details: pd.DataFrame
+    related: pd.DataFrame
+    daily_bars: pd.DataFrame
+    ratios: pd.DataFrame
+    income: pd.DataFrame
+    balance: pd.DataFrame
+    cash_flow: pd.DataFrame
+    sidebar: SidebarState
 
 
 def main() -> None:
-    st.set_page_config(page_title="Finbot Dashboard", layout="wide")
-    st.title("Finbot Dashboard")
+    st.set_page_config(page_title="Finbot Dashboard", page_icon="FB", layout="wide")
 
-    data_root = resolve_data_root()
-    st.caption(f"Data root: `{data_root}`")
+    data_root = resolve_data_root(start_path=Path(__file__).resolve())
+    catalog = load_catalog(str(data_root))
+    catalog_json = load_catalog_json(str(data_root))
 
-    catalog = cached_catalog(str(data_root))
-    if catalog.empty:
-        st.error(f"No catalog found at `{catalog_path(data_root)}`.")
-        st.info("Set FINBOT_DATA_ROOT to the shared Finbot data directory, or mount it to /data in Docker.")
-        return
+    data = AppData(
+        data_root=data_root,
+        catalog=catalog,
+        catalog_json=catalog_json,
+        tickers=read_dataset(str(data_root), TICKERS_DATASET),
+        details=read_dataset(str(data_root), DETAILS_DATASET),
+        related=read_dataset(str(data_root), RELATED_DATASET),
+        daily_bars=read_dataset(str(data_root), DAILY_BARS_DATASET),
+        ratios=read_dataset(str(data_root), RATIOS_DATASET),
+        income=read_dataset(str(data_root), INCOME_DATASET),
+        balance=read_dataset(str(data_root), BALANCE_DATASET),
+        cash_flow=read_dataset(str(data_root), CASH_FLOW_DATASET),
+        sidebar=render_sidebar(read_dataset(str(data_root), TICKERS_DATASET), data_root),
+    )
 
-    catalog_records = tuple(tuple(row) for row in catalog.reindex(columns=CATALOG_COLUMNS).itertuples(index=False, name=None))
+    def render_overview() -> None:
+        overview_page(data)
 
-    tickers = cached_dataset(str(data_root), catalog_records, TICKERS_DATASET)
-    details = cached_dataset(str(data_root), catalog_records, DETAILS_DATASET)
-    related = cached_dataset(str(data_root), catalog_records, RELATED_DATASET)
-    daily_bars = cached_dataset(str(data_root), catalog_records, DAILY_BARS_DATASET)
-    ratios = cached_dataset(str(data_root), catalog_records, RATIOS_DATASET)
+    def render_price_trends() -> None:
+        price_trends_page(data)
 
-    selected_ticker = ticker_selector(tickers)
+    def render_financials() -> None:
+        financials_page(data)
 
-    overview_tab, lookup_tab, detail_tab = st.tabs(["Data Health", "Stock Lookup", "Stock Detail"])
-    with overview_tab:
-        render_catalog_overview(catalog, data_root)
-    with lookup_tab:
-        render_stock_lookup(tickers, selected_ticker)
-    with detail_tab:
-        render_stock_detail(selected_ticker, tickers, details, related, daily_bars, ratios)
+    def render_valuation() -> None:
+        valuation_page(data)
 
+    def render_peers() -> None:
+        peers_page(data)
 
-def ticker_selector(tickers: pd.DataFrame) -> str | None:
-    st.sidebar.header("Ticker")
-    if tickers.empty or "ticker" not in tickers.columns:
-        st.sidebar.warning("Ticker dataset is unavailable.")
-        return None
+    def render_data_quality() -> None:
+        data_quality_page(data)
 
-    query = st.sidebar.text_input("Search", value="")
-    matches = filter_tickers(tickers, query, limit=250)
-    if matches.empty:
-        st.sidebar.info("No matching tickers.")
-        return None
-
-    options = matches["ticker"].dropna().astype(str).tolist()
-    current = st.session_state.get("selected_ticker")
-    index = options.index(current) if current in options else 0
-    selected = st.sidebar.selectbox("Select ticker", options=options, index=index, format_func=lambda value: ticker_label(matches, value))
-    st.session_state["selected_ticker"] = selected
-    return selected
-
-
-def render_catalog_overview(catalog: pd.DataFrame, data_root: Path) -> None:
-    st.subheader("Data Health / Catalog Overview")
-    st.write(f"Catalog: `{catalog_path(data_root)}`")
-
-    statuses = catalog["status"].fillna("unknown").astype(str).str.lower() if "status" in catalog.columns else pd.Series(dtype=str)
-    columns = st.columns(5)
-    for column, status in zip(columns, ["fresh", "stale", "partial", "failed", "missing"]):
-        column.metric(status.title(), int((statuses == status).sum()))
-
-    visible_columns = [
-        "dataset_name",
-        "dataset_group",
-        "status",
-        "status_reason",
-        "row_count",
-        "symbol_count",
-        "collection_timestamp",
-        "data_min_date",
-        "data_max_date",
-        "metadata_path",
-        "parquet_path",
+    pages = [
+        st.Page(render_overview, title="Overview", icon=":material/dashboard:"),
+        st.Page(render_price_trends, title="Price Trends", icon=":material/show_chart:"),
+        st.Page(render_financials, title="Financials", icon=":material/account_balance:"),
+        st.Page(render_valuation, title="Valuation", icon=":material/monitoring:"),
+        st.Page(render_peers, title="Peers", icon=":material/groups:"),
+        st.Page(render_data_quality, title="Data Quality", icon=":material/database:"),
     ]
-    available_columns = [column for column in visible_columns if column in catalog.columns]
-    view = catalog[available_columns].copy()
-    st.dataframe(view.style.apply(highlight_status, axis=1), width="stretch", hide_index=True)
+    st.navigation(pages, position="sidebar").run()
 
 
-def render_stock_lookup(tickers: pd.DataFrame, selected_ticker: str | None) -> None:
-    st.subheader("Stock Lookup")
-    if tickers.empty:
-        st.warning("The reference.tickers dataset is unavailable.")
-        return
-    if not selected_ticker:
-        st.info("Search for a ticker in the sidebar.")
+def overview_page(data: AppData) -> None:
+    ticker = require_ticker(data)
+    if ticker is None:
         return
 
-    row = find_ticker_row(tickers, selected_ticker)
-    if row is None:
-        st.warning(f"No ticker record found for `{selected_ticker}`.")
-        return
+    ticker_row = find_ticker_row(data.tickers, ticker)
+    detail_row = find_ticker_row(data.details, ticker)
+    ratio_row = latest_ratio_snapshot(data.ratios, ticker)
 
-    st.markdown(f"### {value(row, 'ticker')} - {value(row, 'name')}")
-    fields = [
-        ("Exchange", "primary_exchange"),
-        ("Type", "type"),
-        ("Active", "active"),
-        ("Currency", "currency_name"),
-        ("Market", "market"),
-        ("CIK", "cik"),
-        ("Composite FIGI", "composite_figi"),
-        ("Share Class FIGI", "share_class_figi"),
-    ]
-    render_fields(row, fields)
+    title = _first_value(detail_row, ticker_row, "name", fallback=ticker)
+    st.title(f"{title}")
+    st.caption(f"{ticker} | {_first_value(detail_row, ticker_row, 'primary_exchange')} | {_first_value(detail_row, ticker_row, 'sic_description')}")
 
+    if data.details.empty:
+        st.warning("Ticker details are unavailable, so company metadata is limited.")
+    if ratio_row is None:
+        st.warning("Ratio data is unavailable for this ticker, so valuation KPI cards are incomplete.")
 
-def render_stock_detail(
-    selected_ticker: str | None,
-    tickers: pd.DataFrame,
-    details: pd.DataFrame,
-    related: pd.DataFrame,
-    daily_bars: pd.DataFrame,
-    ratios: pd.DataFrame,
-) -> None:
-    st.subheader("Stock Detail")
-    if not selected_ticker:
-        st.info("Search for a ticker in the sidebar.")
-        return
-
-    ticker_row = find_ticker_row(tickers, selected_ticker)
-    name = value(ticker_row, "name") if ticker_row is not None else "Unknown security"
-    st.markdown(f"### {selected_ticker} - {name}")
-
-    ticker_bars = filter_daily_bars_by_ticker(daily_bars, selected_ticker)
-    if ticker_bars.empty:
-        st.info(f"No daily bars are available for `{selected_ticker}`.")
-    else:
-        render_price_history(ticker_bars)
-
-    render_latest_ratios(ratios, selected_ticker)
-    render_ticker_details(details, selected_ticker)
-    render_related_tickers(related, selected_ticker)
-
-
-def render_price_history(ticker_bars: pd.DataFrame) -> None:
-    if "date" not in ticker_bars.columns or "close" not in ticker_bars.columns:
-        st.info("Daily bars are present, but date/close columns are not available for charting.")
-        return
-
-    clean = ticker_bars.dropna(subset=["date", "close"]).copy()
-    if clean.empty:
-        st.info("Daily bars are present, but no close prices are available for charting.")
-        return
-
-    start = clean["date"].min().date()
-    end = clean["date"].max().date()
-    st.caption(f"Available range: {start} to {end}")
-    st.line_chart(clean.set_index("date")["close"], height=320)
-
-    recent_columns = [column for column in ["date", "open", "high", "low", "close", "volume"] if column in clean.columns]
-    recent = clean[recent_columns].sort_values("date", ascending=False).head(30)
-    st.markdown("#### Recent OHLCV")
-    st.dataframe(recent, width="stretch", hide_index=True)
-
-
-def render_ticker_details(details: pd.DataFrame, ticker: str) -> None:
-    st.markdown("#### Company Details")
-    row = find_ticker_row(details, ticker)
-    if row is None:
-        st.info("No ticker details are available for this symbol.")
-        return
-
-    description = value(row, "description")
+    homepage = _first_value(detail_row, ticker_row, "homepage_url")
+    description = _first_value(detail_row, ticker_row, "description")
+    if homepage != "N/A":
+        st.markdown(f"[Company homepage]({homepage})")
     if description != "N/A":
         st.write(description)
 
-    fields = [
-        ("SIC", "sic_code"),
-        ("SIC Description", "sic_description"),
-        ("Market Cap", "market_cap"),
-        ("Homepage", "homepage_url"),
-        ("Employees", "total_employees"),
-        ("Listing Date", "list_date"),
-        ("Phone", "phone_number"),
-    ]
-    render_fields(row, fields)
+    price = _latest_price(data.daily_bars, ticker)
+    render_kpi_cards(
+        [
+            ("Price", format_currency(_ratio_value(ratio_row, "price", price))),
+            ("Market cap", format_currency(_ratio_value(ratio_row, "market_cap"))),
+            ("Enterprise value", format_currency(_ratio_value(ratio_row, "enterprise_value"))),
+            ("P/E", format_ratio(_ratio_value(ratio_row, "price_to_earnings"))),
+            ("EPS", format_currency(_ratio_value(ratio_row, "earnings_per_share"))),
+            ("Price/Sales", format_ratio(_ratio_value(ratio_row, "price_to_sales"))),
+            ("EV/EBITDA", format_ratio(_ratio_value(ratio_row, "ev_to_ebitda"))),
+            ("Free cash flow", format_currency(_ratio_value(ratio_row, "free_cash_flow"))),
+            ("ROE", format_percent(_ratio_value(ratio_row, "return_on_equity"))),
+            ("Debt/Equity", format_ratio(_ratio_value(ratio_row, "debt_to_equity"))),
+        ]
+    )
+
+    st.subheader("Company Profile")
+    render_key_value_grid(
+        detail_row if detail_row is not None else ticker_row,
+        [
+            ("Ticker", "ticker"),
+            ("Exchange", "primary_exchange"),
+            ("SIC", "sic_description"),
+            ("CIK", "cik"),
+            ("Employees", "total_employees"),
+            ("List date", "list_date"),
+            ("Currency", "currency_name"),
+            ("Active", "active"),
+        ],
+    )
+
+    st.subheader("Recent Close Price")
+    bars = filter_date_range(filter_daily_bars_by_ticker(data.daily_bars, ticker), "date", data.sidebar.price_range_days)
+    charts.line_chart(bars, "date", "close", height=260)
 
 
-def render_latest_ratios(ratios: pd.DataFrame, ticker: str) -> None:
-    st.markdown("#### Latest Ratios")
-    row = find_latest_ticker_row(ratios, ticker)
-    if row is None:
-        st.info("No ratios are available for this symbol.")
+def price_trends_page(data: AppData) -> None:
+    ticker = require_ticker(data)
+    if ticker is None:
         return
 
-    date = ratio_value(row, "date")
-    price = ratio_value(row, "price")
-    st.caption(f"Ratio date: {date} | Price: {price}")
+    st.title("Price Trends")
+    st.caption(f"{ticker} | {data.sidebar.price_range_label}")
 
-    valuation_fields = [
-        ("Market Cap", "market_cap"),
-        ("P/E", "price_to_earnings"),
-        ("P/B", "price_to_book"),
-        ("P/S", "price_to_sales"),
-        ("EV/Sales", "ev_to_sales"),
-        ("EV/EBITDA", "ev_to_ebitda"),
-    ]
-    profitability_fields = [
-        ("EPS", "earnings_per_share"),
-        ("Dividend Yield", "dividend_yield"),
-        ("ROA", "return_on_assets"),
-        ("ROE", "return_on_equity"),
-        ("Free Cash Flow", "free_cash_flow"),
-    ]
-    liquidity_fields = [
-        ("Debt/Equity", "debt_to_equity"),
-        ("Current", "current"),
-        ("Quick", "quick"),
-        ("Cash", "cash"),
-        ("Average Volume", "average_volume"),
-    ]
+    bars = filter_date_range(filter_daily_bars_by_ticker(data.daily_bars, ticker), "date", data.sidebar.price_range_days)
+    if bars.empty:
+        st.warning("No price bars are available for the selected ticker and date range.")
+    else:
+        st.subheader("Close Price")
+        charts.line_chart(bars, "date", "close")
+        st.subheader("Volume")
+        charts.line_chart(bars, "date", "volume", height=220)
 
-    render_ratio_fields(row, valuation_fields)
-    with st.expander("Profitability and liquidity ratios", expanded=False):
-        render_ratio_fields(row, profitability_fields)
-        render_ratio_fields(row, liquidity_fields)
-
-
-def render_related_tickers(related: pd.DataFrame, ticker: str) -> None:
-    st.markdown("#### Related Tickers")
-    if related.empty or "ticker" not in related.columns or "related_ticker" not in related.columns:
-        st.info("No related ticker dataset is available.")
-        return
-
-    rows = related.loc[related["ticker"].fillna("").astype(str).str.upper() == ticker.upper()].copy()
-    if rows.empty:
+    peers = [ticker, *related_ticker_list(data.related, ticker)]
+    st.subheader("Indexed Price vs Related Tickers")
+    st.caption("Each series is normalized to 100 at its first available date in the selected window.")
+    indexed = indexed_price_frame(data.daily_bars, peers, data.sidebar.price_range_days)
+    charts.indexed_price_chart(indexed)
+    if len(peers) == 1:
         st.info("No related tickers are available for this symbol.")
+
+
+def financials_page(data: AppData) -> None:
+    ticker = require_ticker(data)
+    if ticker is None:
         return
-    if "result_order" in rows.columns:
-        rows = rows.sort_values("result_order")
-    st.write(", ".join(rows["related_ticker"].dropna().astype(str).tolist()))
+
+    st.title("Financials")
+    st.caption(f"{ticker} | {data.sidebar.financial_timeframe}")
+    _warn_financial_missing(data)
+
+    trends = prepare_financial_trends(data.income, data.cash_flow, data.balance, ticker, data.sidebar.financial_timeframe)
+    if trends.empty:
+        st.warning("No statement rows are available for this ticker and timeframe.")
+        return
+
+    st.subheader("Income Statement Trends")
+    charts.line_chart(
+        trends,
+        "period_end",
+        ["revenue", "gross_profit", "operating_income", "ebitda", "net_income_metric"],
+    )
+
+    st.subheader("Cash Flow and Balance Sheet Trends")
+    charts.line_chart(
+        trends,
+        "period_end",
+        ["net_cash_from_operating_activities", "free_cash_flow_derived", "cash_and_equivalents", "total_debt"],
+    )
+
+    st.subheader("Margins")
+    margin_view = trends[["period_end", "timeframe", "gross_margin", "operating_margin", "ebitda_margin", "net_margin"]].copy()
+    for column in ["gross_margin", "operating_margin", "ebitda_margin", "net_margin"]:
+        margin_view[column] = margin_view[column].map(format_percent)
+    st.dataframe(margin_view.sort_values("period_end", ascending=False), width="stretch", hide_index=True)
+
+    st.subheader("Recent Statement Rows")
+    display_columns = [
+        "period_end",
+        "timeframe",
+        "revenue",
+        "gross_profit",
+        "operating_income",
+        "ebitda",
+        "net_income_metric",
+        "net_cash_from_operating_activities",
+        "free_cash_flow_derived",
+        "cash_and_equivalents",
+        "total_debt",
+    ]
+    st.dataframe(
+        _format_money_columns(trends[[column for column in display_columns if column in trends.columns]]),
+        width="stretch",
+        hide_index=True,
+    )
 
 
-def render_fields(row: pd.Series, fields: list[tuple[str, str]]) -> None:
-    cols = st.columns(4)
-    for index, (label, key) in enumerate(fields):
-        cols[index % 4].metric(label, value(row, key))
+def valuation_page(data: AppData) -> None:
+    ticker = require_ticker(data)
+    if ticker is None:
+        return
+
+    st.title("Valuation")
+    st.caption("Snapshot view. The ratios dataset currently appears to be point-in-time rather than a history.")
+
+    ratio_row = latest_ratio_snapshot(data.ratios, ticker)
+    if ratio_row is None:
+        st.warning("No ratio snapshot is available for this ticker.")
+        return
+
+    if "date" in ratio_row:
+        st.info(f"Snapshot date: {format_plain(ratio_row.get('date'))}")
+
+    render_kpi_cards(
+        [
+            ("Price", format_currency(ratio_row.get("price"))),
+            ("Market cap", format_currency(ratio_row.get("market_cap"))),
+            ("Enterprise value", format_currency(ratio_row.get("enterprise_value"))),
+            ("Dividend yield", format_percent(ratio_row.get("dividend_yield"))),
+            ("ROE", format_percent(ratio_row.get("return_on_equity"))),
+        ]
+    )
+
+    metrics = [
+        ("P/E", "price_to_earnings", format_ratio),
+        ("Price/Sales", "price_to_sales", format_ratio),
+        ("Price/Book", "price_to_book", format_ratio),
+        ("EV/Sales", "ev_to_sales", format_ratio),
+        ("EV/EBITDA", "ev_to_ebitda", format_ratio),
+        ("Price/FCF", "price_to_free_cash_flow", format_ratio),
+        ("Dividend yield", "dividend_yield", format_percent),
+    ]
+    rows = [
+        {"Metric": label, "Value": ratio_row.get(column), "Display": formatter(ratio_row.get(column))}
+        for label, column, formatter in metrics
+    ]
+    metric_frame = pd.DataFrame(rows)
+
+    st.subheader("Valuation Metrics")
+    charts.metric_bar_chart(metric_frame, "Metric", "Value", height=300)
+    st.dataframe(metric_frame[["Metric", "Display"]], width="stretch", hide_index=True)
 
 
-def render_ratio_fields(row: pd.Series, fields: list[tuple[str, str]]) -> None:
-    cols = st.columns(4)
-    for index, (label, key) in enumerate(fields):
-        cols[index % 4].metric(label, ratio_value(row, key))
+def peers_page(data: AppData) -> None:
+    ticker = require_ticker(data)
+    if ticker is None:
+        return
+
+    st.title("Peers")
+    st.caption(data.sidebar.peer_mode)
+
+    peers = related_ticker_list(data.related, ticker)
+    if not peers:
+        st.warning("No related tickers are available for this ticker.")
+    else:
+        st.write(", ".join(peers))
+
+    peer_tickers = [ticker, *[peer for peer in peers if peer != ticker]]
+    comparison = build_peer_comparison(data.ratios, data.income, peer_tickers, data.sidebar.financial_timeframe)
+    columns = [
+        "ticker",
+        "market_cap",
+        "price_to_earnings",
+        "price_to_sales",
+        "ev_to_ebitda",
+        "return_on_equity",
+        "debt_to_equity",
+        "revenue_growth",
+        "ebitda_margin",
+    ]
+    st.subheader("Peer Comparison")
+    st.dataframe(_format_peer_table(comparison[[column for column in columns if column in comparison.columns]]), width="stretch", hide_index=True)
+
+    st.subheader("Indexed Peer Price")
+    indexed = indexed_price_frame(data.daily_bars, peer_tickers, data.sidebar.price_range_days)
+    charts.indexed_price_chart(indexed)
 
 
-def value(row: pd.Series | None, key: str) -> str:
-    if row is None or key not in row:
-        return "N/A"
-    item = row[key]
-    if pd.isna(item):
-        return "N/A"
-    if isinstance(item, float):
-        return f"{item:,.2f}"
-    return str(item)
+def data_quality_page(data: AppData) -> None:
+    st.title("Data Quality")
+    st.caption(f"Data root: `{data.data_root}`")
+
+    if data.catalog_json:
+        catalog = pd.DataFrame(data.catalog_json)
+        st.caption("Using the JSON catalog for this page.")
+    else:
+        catalog = data.catalog
+        st.warning("Catalog JSON is missing. File existence is inferred from expected dataset paths when catalog rows are unavailable.")
+
+    quality = build_data_quality_frame(data.data_root, catalog)
+    if quality.empty:
+        st.warning("No dataset quality records could be built.")
+        return
+
+    statuses = quality["status"].fillna("unknown").astype(str).str.lower()
+    for column, status in zip(st.columns(5), ["fresh", "stale", "partial", "missing", "uncataloged"]):
+        column.metric(status.title(), int((statuses == status).sum()))
+
+    st.dataframe(quality, width="stretch", hide_index=True)
 
 
-def ratio_value(row: pd.Series | None, key: str) -> str:
-    if row is None or key not in row:
-        return "N/A"
-    item = row[key]
-    if pd.isna(item):
-        return "N/A"
-    if key == "date":
-        parsed = pd.to_datetime(item, errors="coerce")
-        if pd.isna(parsed):
-            return str(item)
-        return str(parsed.date())
-    if key in PERCENT_RATIO_FIELDS:
-        return f"{float(item) * 100:,.2f}%"
-    if key in MONEY_RATIO_FIELDS:
-        return compact_number(float(item), prefix="$")
-    if key in COMPACT_RATIO_FIELDS:
-        return compact_number(float(item))
-    if isinstance(item, int | float):
-        return f"{item:,.2f}"
-    return str(item)
+def require_ticker(data: AppData) -> str | None:
+    if data.sidebar.ticker:
+        return data.sidebar.ticker
+    st.title("Finbot Dashboard")
+    st.info("Select a ticker in the sidebar to begin.")
+    return None
 
 
-def compact_number(number: float, prefix: str = "") -> str:
-    absolute = abs(number)
-    for suffix, divisor in [("T", 1_000_000_000_000), ("B", 1_000_000_000), ("M", 1_000_000), ("K", 1_000)]:
-        if absolute >= divisor:
-            return f"{prefix}{number / divisor:,.2f}{suffix}"
-    return f"{prefix}{number:,.2f}"
+def _latest_price(daily_bars: pd.DataFrame, ticker: str) -> object:
+    bars = filter_daily_bars_by_ticker(daily_bars, ticker)
+    if bars.empty or "close" not in bars.columns or "date" not in bars.columns:
+        return pd.NA
+    bars = bars.dropna(subset=["date"]).sort_values("date")
+    if bars.empty:
+        return pd.NA
+    return bars.iloc[-1].get("close", pd.NA)
 
 
-def ticker_label(matches: pd.DataFrame, ticker: str) -> str:
-    row = find_ticker_row(matches, ticker)
-    if row is None:
-        return ticker
-    name = value(row, "name")
-    return ticker if name == "N/A" else f"{ticker} - {name}"
+def _ratio_value(row: pd.Series | None, key: str, fallback: object = pd.NA) -> object:
+    if row is None or key not in row or is_missing(row.get(key)):
+        return fallback
+    return row.get(key)
 
 
-def highlight_status(row: pd.Series) -> list[str]:
-    status = str(row.get("status", "")).lower()
-    colors = {
-        "fresh": "background-color: #e6f4ea",
-        "stale": "background-color: #fff4ce",
-        "partial": "background-color: #e8f0fe",
-        "failed": "background-color: #fce8e6",
-        "missing": "background-color: #f1f3f4",
+def _first_value(primary: pd.Series | None, secondary: pd.Series | None, key: str, fallback: str = "N/A") -> str:
+    for row in [primary, secondary]:
+        if row is not None and key in row and not is_missing(row.get(key)):
+            return str(row.get(key))
+    return fallback
+
+
+def _warn_financial_missing(data: AppData) -> None:
+    missing = []
+    for frame, name in [
+        (data.income, INCOME_DATASET),
+        (data.cash_flow, CASH_FLOW_DATASET),
+        (data.balance, BALANCE_DATASET),
+    ]:
+        if frame.empty:
+            missing.append(name)
+    if missing:
+        st.warning("Missing or unreadable financial datasets: " + ", ".join(f"`{name}`" for name in missing))
+
+
+def _format_money_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    for column in result.columns:
+        if column not in {"period_end", "timeframe"}:
+            result[column] = result[column].map(format_currency)
+    if "period_end" in result.columns:
+        result["period_end"] = result["period_end"].map(format_plain)
+    return result.sort_values("period_end", ascending=False)
+
+
+def _format_peer_table(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    formatters = {
+        "market_cap": format_currency,
+        "price_to_earnings": format_ratio,
+        "price_to_sales": format_ratio,
+        "ev_to_ebitda": format_ratio,
+        "return_on_equity": format_percent,
+        "debt_to_equity": format_ratio,
+        "revenue_growth": format_percent,
+        "ebitda_margin": format_percent,
     }
-    return [colors.get(status, "") for _ in row]
+    for column, formatter in formatters.items():
+        if column in result.columns:
+            result[column] = result[column].map(formatter)
+    return result.fillna("N/A")
 
 
 if __name__ == "__main__":
