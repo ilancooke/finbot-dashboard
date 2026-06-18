@@ -1,21 +1,25 @@
 """Read-only helpers for the Finbot dashboard."""
 
-from finbot_dashboard.data_access import (
+from finbot_dashboard.config import OPS_CATALOG_FILENAME
+from finbot_dashboard.data_loader import (
     CATALOG_FILENAME,
-    filter_daily_bars_by_ticker,
-    filter_tickers,
-    load_catalog,
-    read_dataset,
+    attention_records,
+    coverage_records,
+    filter_ops_records,
+    load_dataset_catalog,
+    load_ops_catalog,
     resolve_data_root,
-    resolve_dataset_path,
+    status_counts,
 )
 
 __all__ = [
     "CATALOG_FILENAME",
-    "filter_daily_bars_by_ticker",
-    "filter_tickers",
-    "load_catalog",
-    "read_dataset",
+    "OPS_CATALOG_FILENAME",
+    "attention_records",
+    "coverage_records",
+    "filter_ops_records",
+    "load_dataset_catalog",
+    "load_ops_catalog",
     "resolve_data_root",
-    "resolve_dataset_path",
+    "status_counts",
 ]

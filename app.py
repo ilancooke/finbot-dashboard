@@ -6,427 +6,277 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from finbot_dashboard import charts
-from finbot_dashboard.config import (
-    BALANCE_DATASET,
-    CASH_FLOW_DATASET,
-    DAILY_BARS_DATASET,
-    DETAILS_DATASET,
-    INCOME_DATASET,
-    RATIOS_DATASET,
-    RELATED_DATASET,
-    TICKERS_DATASET,
-)
+from finbot_dashboard.config import ATTENTION_STATUSES, HEALTHY_STATUSES
 from finbot_dashboard.data_loader import (
-    build_data_quality_frame,
-    filter_daily_bars_by_ticker,
-    filter_date_range,
-    find_ticker_row,
-    load_catalog,
-    load_catalog_json,
-    read_dataset,
-    related_ticker_list,
+    attention_records,
+    coverage_records,
+    discovery_counts,
+    filter_ops_records,
+    load_dataset_catalog,
+    load_ops_catalog,
     resolve_data_root,
+    status_counts,
 )
-from finbot_dashboard.formatting import (
-    format_currency,
-    format_percent,
-    format_plain,
-    format_ratio,
-    is_missing,
-)
-from finbot_dashboard.metrics import (
-    build_peer_comparison,
-    indexed_price_frame,
-    latest_ratio_snapshot,
-    prepare_financial_trends,
-)
-from finbot_dashboard.ui import SidebarState, render_kpi_cards, render_key_value_grid, render_sidebar
+from finbot_dashboard.formatting import format_plain
 
 
 @dataclass(frozen=True)
 class AppData:
     data_root: Path
-    catalog: pd.DataFrame
-    catalog_json: list[dict[str, object]]
-    tickers: pd.DataFrame
-    details: pd.DataFrame
-    related: pd.DataFrame
-    daily_bars: pd.DataFrame
-    ratios: pd.DataFrame
-    income: pd.DataFrame
-    balance: pd.DataFrame
-    cash_flow: pd.DataFrame
-    sidebar: SidebarState
+    dataset_catalog: pd.DataFrame
+    ops_catalog: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class OpsFilters:
+    statuses: list[str]
+    discovery_statuses: list[str]
+    registered_only: bool
+    search: str
 
 
 def main() -> None:
-    st.set_page_config(page_title="Finbot Dashboard", page_icon="FB", layout="wide")
+    st.set_page_config(page_title="Finbot Ops", page_icon="FB", layout="wide")
 
     data_root = resolve_data_root(start_path=Path(__file__).resolve())
-    catalog = load_catalog(str(data_root))
-    catalog_json = load_catalog_json(str(data_root))
-
     data = AppData(
         data_root=data_root,
-        catalog=catalog,
-        catalog_json=catalog_json,
-        tickers=read_dataset(str(data_root), TICKERS_DATASET),
-        details=read_dataset(str(data_root), DETAILS_DATASET),
-        related=read_dataset(str(data_root), RELATED_DATASET),
-        daily_bars=read_dataset(str(data_root), DAILY_BARS_DATASET),
-        ratios=read_dataset(str(data_root), RATIOS_DATASET),
-        income=read_dataset(str(data_root), INCOME_DATASET),
-        balance=read_dataset(str(data_root), BALANCE_DATASET),
-        cash_flow=read_dataset(str(data_root), CASH_FLOW_DATASET),
-        sidebar=render_sidebar(read_dataset(str(data_root), TICKERS_DATASET), data_root),
+        dataset_catalog=load_dataset_catalog(str(data_root)),
+        ops_catalog=load_ops_catalog(str(data_root)),
     )
+    filters = render_sidebar(data)
 
-    def render_overview() -> None:
-        overview_page(data)
+    def render_data_health() -> None:
+        data_health_page(data, filters)
 
-    def render_price_trends() -> None:
-        price_trends_page(data)
-
-    def render_financials() -> None:
-        financials_page(data)
-
-    def render_valuation() -> None:
-        valuation_page(data)
-
-    def render_peers() -> None:
-        peers_page(data)
-
-    def render_data_quality() -> None:
-        data_quality_page(data)
+    def render_catalog_explorer() -> None:
+        catalog_explorer_page(data)
 
     pages = [
-        st.Page(render_overview, title="Overview", icon=":material/dashboard:"),
-        st.Page(render_price_trends, title="Price Trends", icon=":material/show_chart:"),
-        st.Page(render_financials, title="Financials", icon=":material/account_balance:"),
-        st.Page(render_valuation, title="Valuation", icon=":material/monitoring:"),
-        st.Page(render_peers, title="Peers", icon=":material/groups:"),
-        st.Page(render_data_quality, title="Data Quality", icon=":material/database:"),
+        st.Page(render_data_health, title="Data Health", icon=":material/monitor_heart:"),
+        st.Page(render_catalog_explorer, title="Catalog Explorer", icon=":material/table_view:"),
     ]
     st.navigation(pages, position="sidebar").run()
 
 
-def overview_page(data: AppData) -> None:
-    ticker = require_ticker(data)
-    if ticker is None:
-        return
+def render_sidebar(data: AppData) -> OpsFilters:
+    st.sidebar.title("Finbot Ops")
+    st.sidebar.caption(f"Data root: `{data.data_root}`")
 
-    ticker_row = find_ticker_row(data.tickers, ticker)
-    detail_row = find_ticker_row(data.details, ticker)
-    ratio_row = latest_ratio_snapshot(data.ratios, ticker)
-
-    title = _first_value(detail_row, ticker_row, "name", fallback=ticker)
-    st.title(f"{title}")
-    st.caption(f"{ticker} | {_first_value(detail_row, ticker_row, 'primary_exchange')} | {_first_value(detail_row, ticker_row, 'sic_description')}")
-
-    if data.details.empty:
-        st.warning("Ticker details are unavailable, so company metadata is limited.")
-    if ratio_row is None:
-        st.warning("Ratio data is unavailable for this ticker, so valuation KPI cards are incomplete.")
-
-    homepage = _first_value(detail_row, ticker_row, "homepage_url")
-    description = _first_value(detail_row, ticker_row, "description")
-    if homepage != "N/A":
-        st.markdown(f"[Company homepage]({homepage})")
-    if description != "N/A":
-        st.write(description)
-
-    price = _latest_price(data.daily_bars, ticker)
-    render_kpi_cards(
-        [
-            ("Price", format_currency(_ratio_value(ratio_row, "price", price))),
-            ("Market cap", format_currency(_ratio_value(ratio_row, "market_cap"))),
-            ("Enterprise value", format_currency(_ratio_value(ratio_row, "enterprise_value"))),
-            ("P/E", format_ratio(_ratio_value(ratio_row, "price_to_earnings"))),
-            ("EPS", format_currency(_ratio_value(ratio_row, "earnings_per_share"))),
-            ("Price/Sales", format_ratio(_ratio_value(ratio_row, "price_to_sales"))),
-            ("EV/EBITDA", format_ratio(_ratio_value(ratio_row, "ev_to_ebitda"))),
-            ("Free cash flow", format_currency(_ratio_value(ratio_row, "free_cash_flow"))),
-            ("ROE", format_percent(_ratio_value(ratio_row, "return_on_equity"))),
-            ("Debt/Equity", format_ratio(_ratio_value(ratio_row, "debt_to_equity"))),
-        ]
+    ops = data.ops_catalog
+    available_statuses = _unique_values(ops, "status")
+    default_statuses = [status for status in available_statuses if status in HEALTHY_STATUSES | ATTENTION_STATUSES]
+    statuses = st.sidebar.multiselect(
+        "Status",
+        options=available_statuses,
+        default=default_statuses,
     )
-
-    st.subheader("Company Profile")
-    render_key_value_grid(
-        detail_row if detail_row is not None else ticker_row,
-        [
-            ("Ticker", "ticker"),
-            ("Exchange", "primary_exchange"),
-            ("SIC", "sic_description"),
-            ("CIK", "cik"),
-            ("Employees", "total_employees"),
-            ("List date", "list_date"),
-            ("Currency", "currency_name"),
-            ("Active", "active"),
-        ],
+    discovery_statuses = st.sidebar.multiselect(
+        "Discovery",
+        options=_unique_values(ops, "discovery_status"),
+        default=[],
     )
-
-    st.subheader("Recent Close Price")
-    bars = filter_date_range(filter_daily_bars_by_ticker(data.daily_bars, ticker), "date", data.sidebar.price_range_days)
-    charts.line_chart(bars, "date", "close", height=260)
-
-
-def price_trends_page(data: AppData) -> None:
-    ticker = require_ticker(data)
-    if ticker is None:
-        return
-
-    st.title("Price Trends")
-    st.caption(f"{ticker} | {data.sidebar.price_range_label}")
-
-    bars = filter_date_range(filter_daily_bars_by_ticker(data.daily_bars, ticker), "date", data.sidebar.price_range_days)
-    if bars.empty:
-        st.warning("No price bars are available for the selected ticker and date range.")
-    else:
-        st.subheader("Close Price")
-        charts.line_chart(bars, "date", "close")
-        st.subheader("Volume")
-        charts.line_chart(bars, "date", "volume", height=220)
-
-    peers = [ticker, *related_ticker_list(data.related, ticker)]
-    st.subheader("Indexed Price vs Related Tickers")
-    st.caption("Each series is normalized to 100 at its first available date in the selected window.")
-    indexed = indexed_price_frame(data.daily_bars, peers, data.sidebar.price_range_days)
-    charts.indexed_price_chart(indexed)
-    if len(peers) == 1:
-        st.info("No related tickers are available for this symbol.")
-
-
-def financials_page(data: AppData) -> None:
-    ticker = require_ticker(data)
-    if ticker is None:
-        return
-
-    st.title("Financials")
-    st.caption(f"{ticker} | {data.sidebar.financial_timeframe}")
-    _warn_financial_missing(data)
-
-    trends = prepare_financial_trends(data.income, data.cash_flow, data.balance, ticker, data.sidebar.financial_timeframe)
-    if trends.empty:
-        st.warning("No statement rows are available for this ticker and timeframe.")
-        return
-
-    st.subheader("Income Statement Trends")
-    charts.line_chart(
-        trends,
-        "period_end",
-        ["revenue", "gross_profit", "operating_income", "ebitda", "net_income_metric"],
-    )
-
-    st.subheader("Cash Flow and Balance Sheet Trends")
-    charts.line_chart(
-        trends,
-        "period_end",
-        ["net_cash_from_operating_activities", "free_cash_flow_derived", "cash_and_equivalents", "total_debt"],
-    )
-
-    st.subheader("Margins")
-    margin_view = trends[["period_end", "timeframe", "gross_margin", "operating_margin", "ebitda_margin", "net_margin"]].copy()
-    for column in ["gross_margin", "operating_margin", "ebitda_margin", "net_margin"]:
-        margin_view[column] = margin_view[column].map(format_percent)
-    st.dataframe(margin_view.sort_values("period_end", ascending=False), width="stretch", hide_index=True)
-
-    st.subheader("Recent Statement Rows")
-    display_columns = [
-        "period_end",
-        "timeframe",
-        "revenue",
-        "gross_profit",
-        "operating_income",
-        "ebitda",
-        "net_income_metric",
-        "net_cash_from_operating_activities",
-        "free_cash_flow_derived",
-        "cash_and_equivalents",
-        "total_debt",
-    ]
-    st.dataframe(
-        _format_money_columns(trends[[column for column in display_columns if column in trends.columns]]),
-        width="stretch",
-        hide_index=True,
+    registered_only = st.sidebar.toggle("Registered only", value=False)
+    search = st.sidebar.text_input("Search", value="")
+    return OpsFilters(
+        statuses=statuses,
+        discovery_statuses=discovery_statuses,
+        registered_only=registered_only,
+        search=search,
     )
 
 
-def valuation_page(data: AppData) -> None:
-    ticker = require_ticker(data)
-    if ticker is None:
-        return
-
-    st.title("Valuation")
-    st.caption("Snapshot view. The ratios dataset currently appears to be point-in-time rather than a history.")
-
-    ratio_row = latest_ratio_snapshot(data.ratios, ticker)
-    if ratio_row is None:
-        st.warning("No ratio snapshot is available for this ticker.")
-        return
-
-    if "date" in ratio_row:
-        st.info(f"Snapshot date: {format_plain(ratio_row.get('date'))}")
-
-    render_kpi_cards(
-        [
-            ("Price", format_currency(ratio_row.get("price"))),
-            ("Market cap", format_currency(ratio_row.get("market_cap"))),
-            ("Enterprise value", format_currency(ratio_row.get("enterprise_value"))),
-            ("Dividend yield", format_percent(ratio_row.get("dividend_yield"))),
-            ("ROE", format_percent(ratio_row.get("return_on_equity"))),
-        ]
-    )
-
-    metrics = [
-        ("P/E", "price_to_earnings", format_ratio),
-        ("Price/Sales", "price_to_sales", format_ratio),
-        ("Price/Book", "price_to_book", format_ratio),
-        ("EV/Sales", "ev_to_sales", format_ratio),
-        ("EV/EBITDA", "ev_to_ebitda", format_ratio),
-        ("Price/FCF", "price_to_free_cash_flow", format_ratio),
-        ("Dividend yield", "dividend_yield", format_percent),
-    ]
-    rows = [
-        {"Metric": label, "Value": ratio_row.get(column), "Display": formatter(ratio_row.get(column))}
-        for label, column, formatter in metrics
-    ]
-    metric_frame = pd.DataFrame(rows)
-
-    st.subheader("Valuation Metrics")
-    charts.metric_bar_chart(metric_frame, "Metric", "Value", height=300)
-    st.dataframe(metric_frame[["Metric", "Display"]], width="stretch", hide_index=True)
-
-
-def peers_page(data: AppData) -> None:
-    ticker = require_ticker(data)
-    if ticker is None:
-        return
-
-    st.title("Peers")
-    st.caption(data.sidebar.peer_mode)
-
-    peers = related_ticker_list(data.related, ticker)
-    if not peers:
-        st.warning("No related tickers are available for this ticker.")
-    else:
-        st.write(", ".join(peers))
-
-    peer_tickers = [ticker, *[peer for peer in peers if peer != ticker]]
-    comparison = build_peer_comparison(data.ratios, data.income, peer_tickers, data.sidebar.financial_timeframe)
-    columns = [
-        "ticker",
-        "market_cap",
-        "price_to_earnings",
-        "price_to_sales",
-        "ev_to_ebitda",
-        "return_on_equity",
-        "debt_to_equity",
-        "revenue_growth",
-        "ebitda_margin",
-    ]
-    st.subheader("Peer Comparison")
-    st.dataframe(_format_peer_table(comparison[[column for column in columns if column in comparison.columns]]), width="stretch", hide_index=True)
-
-    st.subheader("Indexed Peer Price")
-    indexed = indexed_price_frame(data.daily_bars, peer_tickers, data.sidebar.price_range_days)
-    charts.indexed_price_chart(indexed)
-
-
-def data_quality_page(data: AppData) -> None:
-    st.title("Data Quality")
+def data_health_page(data: AppData, filters: OpsFilters) -> None:
+    st.title("Data Health")
     st.caption(f"Data root: `{data.data_root}`")
 
-    if data.catalog_json:
-        catalog = pd.DataFrame(data.catalog_json)
-        st.caption("Using the JSON catalog for this page.")
-    else:
-        catalog = data.catalog
-        st.warning("Catalog JSON is missing. File existence is inferred from expected dataset paths when catalog rows are unavailable.")
-
-    quality = build_data_quality_frame(data.data_root, catalog)
-    if quality.empty:
-        st.warning("No dataset quality records could be built.")
+    if data.ops_catalog.empty:
+        st.warning("`ops_catalog.parquet` is missing or empty. Rebuild the catalog after data refreshes.")
         return
 
-    statuses = quality["status"].fillna("unknown").astype(str).str.lower()
-    for column, status in zip(st.columns(5), ["fresh", "stale", "partial", "missing", "uncataloged"]):
-        column.metric(status.title(), int((statuses == status).sum()))
+    filtered = filter_ops_records(
+        data.ops_catalog,
+        statuses=filters.statuses,
+        discovery_statuses=filters.discovery_statuses,
+        registered_only=filters.registered_only,
+        search=filters.search,
+    )
 
-    st.dataframe(quality, width="stretch", hide_index=True)
+    render_summary(data.ops_catalog)
+    render_status_distribution(data.ops_catalog)
 
+    problems = attention_records(data.ops_catalog)
+    st.subheader("Attention")
+    if problems.empty:
+        st.success("All cataloged datasets are fresh.")
+    else:
+        st.dataframe(_display_frame(problems, ATTENTION_COLUMNS), width="stretch", hide_index=True)
 
-def require_ticker(data: AppData) -> str | None:
-    if data.sidebar.ticker:
-        return data.sidebar.ticker
-    st.title("Finbot Dashboard")
-    st.info("Select a ticker in the sidebar to begin.")
-    return None
+    coverage = coverage_records(data.ops_catalog)
+    st.subheader("Latest Coverage")
+    if coverage.empty:
+        st.info("No latest-date coverage metrics are available.")
+    else:
+        st.dataframe(
+            _display_frame(coverage, COVERAGE_COLUMNS),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "latest_date_coverage_pct": st.column_config.ProgressColumn(
+                    "latest_date_coverage_pct",
+                    min_value=0.0,
+                    max_value=1.0,
+                    format="%.1f",
+                )
+            },
+        )
 
-
-def _latest_price(daily_bars: pd.DataFrame, ticker: str) -> object:
-    bars = filter_daily_bars_by_ticker(daily_bars, ticker)
-    if bars.empty or "close" not in bars.columns or "date" not in bars.columns:
-        return pd.NA
-    bars = bars.dropna(subset=["date"]).sort_values("date")
-    if bars.empty:
-        return pd.NA
-    return bars.iloc[-1].get("close", pd.NA)
-
-
-def _ratio_value(row: pd.Series | None, key: str, fallback: object = pd.NA) -> object:
-    if row is None or key not in row or is_missing(row.get(key)):
-        return fallback
-    return row.get(key)
-
-
-def _first_value(primary: pd.Series | None, secondary: pd.Series | None, key: str, fallback: str = "N/A") -> str:
-    for row in [primary, secondary]:
-        if row is not None and key in row and not is_missing(row.get(key)):
-            return str(row.get(key))
-    return fallback
-
-
-def _warn_financial_missing(data: AppData) -> None:
-    missing = []
-    for frame, name in [
-        (data.income, INCOME_DATASET),
-        (data.cash_flow, CASH_FLOW_DATASET),
-        (data.balance, BALANCE_DATASET),
-    ]:
-        if frame.empty:
-            missing.append(name)
-    if missing:
-        st.warning("Missing or unreadable financial datasets: " + ", ".join(f"`{name}`" for name in missing))
+    st.subheader("Dataset State")
+    st.dataframe(_display_frame(filtered, STATE_COLUMNS), width="stretch", hide_index=True)
 
 
-def _format_money_columns(frame: pd.DataFrame) -> pd.DataFrame:
-    result = frame.copy()
-    for column in result.columns:
-        if column not in {"period_end", "timeframe"}:
-            result[column] = result[column].map(format_currency)
-    if "period_end" in result.columns:
-        result["period_end"] = result["period_end"].map(format_plain)
-    return result.sort_values("period_end", ascending=False)
+def catalog_explorer_page(data: AppData) -> None:
+    st.title("Catalog Explorer")
+    st.caption(f"Data root: `{data.data_root}`")
+
+    if data.dataset_catalog.empty:
+        st.warning("`dataset_catalog.parquet` is missing or empty.")
+        return
+
+    render_catalog_summary(data.dataset_catalog)
+    st.subheader("Dataset Catalog")
+    st.dataframe(_display_frame(data.dataset_catalog, CATALOG_COLUMNS), width="stretch", hide_index=True)
+
+    with st.expander("Schema And Details", expanded=False):
+        selected = st.selectbox(
+            "Dataset",
+            options=data.dataset_catalog["dataset_name"].dropna().astype(str).sort_values().tolist(),
+        )
+        row = data.dataset_catalog.loc[data.dataset_catalog["dataset_name"].astype(str) == selected]
+        if not row.empty:
+            st.json(row.iloc[0].to_dict())
 
 
-def _format_peer_table(frame: pd.DataFrame) -> pd.DataFrame:
-    result = frame.copy()
-    formatters = {
-        "market_cap": format_currency,
-        "price_to_earnings": format_ratio,
-        "price_to_sales": format_ratio,
-        "ev_to_ebitda": format_ratio,
-        "return_on_equity": format_percent,
-        "debt_to_equity": format_ratio,
-        "revenue_growth": format_percent,
-        "ebitda_margin": format_percent,
-    }
-    for column, formatter in formatters.items():
+def render_summary(ops: pd.DataFrame) -> None:
+    counts = status_counts(ops)
+    total = int(len(ops))
+    fresh = counts.get("fresh", 0)
+    attention = sum(counts.get(status, 0) for status in ATTENTION_STATUSES)
+    missing = counts.get("missing", 0)
+    coverage = pd.to_numeric(ops.get("latest_date_coverage_pct"), errors="coerce")
+    average_coverage = coverage.dropna().mean()
+
+    columns = st.columns(5)
+    columns[0].metric("Datasets", total)
+    columns[1].metric("Fresh", fresh)
+    columns[2].metric("Attention", attention)
+    columns[3].metric("Missing", missing)
+    columns[4].metric("Avg Coverage", "N/A" if pd.isna(average_coverage) else f"{average_coverage * 100:.1f}%")
+
+
+def render_status_distribution(ops: pd.DataFrame) -> None:
+    left, right = st.columns(2)
+    status_frame = _counts_frame(status_counts(ops), "status")
+    discovery_frame = _counts_frame(discovery_counts(ops), "discovery_status")
+    with left:
+        st.subheader("Status")
+        if status_frame.empty:
+            st.info("No status values are available.")
+        else:
+            st.bar_chart(status_frame.set_index("status")["count"], height=220)
+    with right:
+        st.subheader("Discovery")
+        if discovery_frame.empty:
+            st.info("No discovery values are available.")
+        else:
+            st.bar_chart(discovery_frame.set_index("discovery_status")["count"], height=220)
+
+
+def render_catalog_summary(catalog: pd.DataFrame) -> None:
+    registered = int(catalog["is_registered"].fillna(False).astype(bool).sum()) if "is_registered" in catalog else 0
+    parquet_present = int(catalog["parquet_exists"].fillna(False).astype(bool).sum()) if "parquet_exists" in catalog else 0
+    metadata_present = int(catalog["metadata_exists"].fillna(False).astype(bool).sum()) if "metadata_exists" in catalog else 0
+    columns = st.columns(4)
+    columns[0].metric("Catalog Records", int(len(catalog)))
+    columns[1].metric("Registered", registered)
+    columns[2].metric("Parquet Present", parquet_present)
+    columns[3].metric("Metadata Present", metadata_present)
+
+
+def _display_frame(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    available = [column for column in columns if column in frame.columns]
+    result = frame[available].copy() if available else frame.copy()
+    for column in ["generated_at_utc", "observed_at_utc", "min_date", "max_date", "latest_date", "provider_max_lastupdated"]:
         if column in result.columns:
-            result[column] = result[column].map(formatter)
-    return result.fillna("N/A")
+            result[column] = result[column].map(format_plain)
+    return result
+
+
+def _counts_frame(counts: dict[str, int], label: str) -> pd.DataFrame:
+    return pd.DataFrame([{label: key, "count": value} for key, value in counts.items()])
+
+
+def _unique_values(frame: pd.DataFrame, column: str) -> list[str]:
+    if frame.empty or column not in frame.columns:
+        return []
+    return sorted(frame[column].dropna().astype(str).unique().tolist())
+
+
+STATE_COLUMNS = [
+    "dataset_name",
+    "status",
+    "discovery_status",
+    "is_registered",
+    "row_count",
+    "entity_count",
+    "max_date",
+    "latest_date",
+    "latest_date_coverage_pct",
+    "provider_max_lastupdated",
+    "duplicate_key_count",
+    "status_reason",
+]
+
+ATTENTION_COLUMNS = [
+    "dataset_name",
+    "status",
+    "discovery_status",
+    "status_reason",
+    "row_count",
+    "max_date",
+    "provider_max_lastupdated",
+    "missing_required_columns",
+]
+
+COVERAGE_COLUMNS = [
+    "dataset_name",
+    "status",
+    "latest_date",
+    "latest_date_coverage_count",
+    "latest_date_coverage_pct",
+    "entity_count",
+    "provider_max_lastupdated",
+]
+
+CATALOG_COLUMNS = [
+    "dataset_name",
+    "dataset_group",
+    "discovery_status",
+    "is_registered",
+    "owner_repo",
+    "producer_job",
+    "provider",
+    "write_mode",
+    "completeness_profile",
+    "row_count",
+    "entity_count",
+    "min_date",
+    "max_date",
+    "status",
+    "status_reason",
+    "parquet_path",
+    "metadata_path",
+]
 
 
 if __name__ == "__main__":
