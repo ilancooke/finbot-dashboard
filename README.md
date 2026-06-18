@@ -1,13 +1,16 @@
 # finbot-dashboard
 
-A read-only Streamlit dashboard for Finbot data operations.
+A read-only Streamlit dashboard for Finbot data operations and stock research views.
 
 The app reads only local catalog files under `FINBOT_DATA_ROOT`. It does not call external APIs,
 download data, mutate datasets, compute features, or orchestrate jobs.
 
 ## Purpose
 
-This dashboard shows the current state of local Finbot datasets:
+This dashboard shows the current state of local Finbot datasets and provides local stock research
+views backed by cataloged parquet datasets.
+
+The ops pages show:
 
 - Which expected datasets are present or missing.
 - Which datasets are fresh, stale, partial, failed, or unknown.
@@ -21,6 +24,8 @@ This dashboard shows the current state of local Finbot datasets:
   filtered dataset-state records from `ops_catalog.parquet`.
 - **Catalog Explorer**: compact view of `dataset_catalog.parquet`, including paths, ownership,
   schema metadata, and detailed record JSON.
+- **Stock Overview**: ticker lookup, company metadata, adjusted price history, latest valuation
+  metrics, valuation history charts, and Sharadar metric descriptions.
 
 ## Expected Data Layout
 
@@ -32,6 +37,15 @@ finbot/
 │       ├── dataset_catalog.json
 │       ├── ops_catalog.parquet
 │       └── ops_catalog.json
+│   ├── fundamentals/
+│   │   └── daily_valuation_metrics.parquet
+│   ├── market/
+│   │   └── daily_bars/
+│   │       └── historical.parquet
+│   ├── reference/
+│   │   └── tickers.parquet
+│   └── temp/
+│       └── SHARADAR-INDICATORS.csv
 └── repos/
     └── finbot-dashboard/
 ```
@@ -91,10 +105,23 @@ export FINBOT_DASHBOARD_CACHE_TTL_SECONDS=60
 After `finbot-data` writes parquet files and `finbot-catalog` rebuilds the catalog, the dashboard
 sees refreshed data after the cache expires.
 
+## Stock Overview Data
+
+The Stock Overview page resolves its parquet inputs from `dataset_catalog.parquet`:
+
+- `reference.tickers`: stock selector and company metadata.
+- `market.daily_bars.historical`: price history keyed by `symbol` and `date`.
+- `fundamentals.daily_valuation_metrics`: valuation history keyed by `ticker` and `date`.
+
+It also reads `temp/SHARADAR-INDICATORS.csv` for friendly valuation metric names and descriptions.
+All reads are local and filtered to the selected ticker.
+
 ## Code Layout
 
 - `app.py`: Streamlit navigation shell and ops pages.
 - `finbot_dashboard/data_loader.py`: data-root resolution, catalog loading, and ops filtering.
+- `finbot_dashboard/stock_data.py`: stock-reference, price-history, valuation-history, and
+  Sharadar indicator loading.
 - `finbot_dashboard/formatting.py`: display formatting helpers.
 - `finbot_dashboard/config.py`: catalog filenames and cache settings.
 
@@ -105,4 +132,5 @@ pytest
 ```
 
 Tests cover data-root resolution, catalog loading, ops loading, status summaries, attention
-records, coverage records, and ops filtering.
+records, coverage records, ops filtering, stock dataset path resolution, ticker lookup, price
+history, valuation history, and Sharadar indicator labels.

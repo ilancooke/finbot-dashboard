@@ -18,6 +18,15 @@ from finbot_dashboard.data_loader import (
     status_counts,
 )
 from finbot_dashboard.formatting import format_plain
+from finbot_dashboard.stock_data import (
+    VALUATION_METRIC_COLUMNS,
+    filter_history_range,
+    latest_valuation_metrics,
+    load_daily_indicator_info,
+    load_price_history,
+    load_ticker_reference,
+    load_valuation_history,
+)
 
 
 @dataclass(frozen=True)
@@ -36,7 +45,7 @@ class OpsFilters:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Finbot Ops", page_icon="FB", layout="wide")
+    st.set_page_config(page_title="Finbot Dashboard", page_icon="FB", layout="wide")
 
     data_root = resolve_data_root(start_path=Path(__file__).resolve())
     data = AppData(
@@ -44,40 +53,49 @@ def main() -> None:
         dataset_catalog=load_dataset_catalog(str(data_root)),
         ops_catalog=load_ops_catalog(str(data_root)),
     )
-    filters = render_sidebar(data)
+    render_global_sidebar(data)
 
     def render_data_health() -> None:
-        data_health_page(data, filters)
+        data_health_page(data)
 
     def render_catalog_explorer() -> None:
         catalog_explorer_page(data)
 
+    def render_stock_overview() -> None:
+        stock_overview_page(data)
+
     pages = [
         st.Page(render_data_health, title="Data Health", icon=":material/monitor_heart:"),
         st.Page(render_catalog_explorer, title="Catalog Explorer", icon=":material/table_view:"),
+        st.Page(render_stock_overview, title="Stock Overview", icon=":material/candlestick_chart:"),
     ]
     st.navigation(pages, position="sidebar").run()
 
 
-def render_sidebar(data: AppData) -> OpsFilters:
-    st.sidebar.title("Finbot Ops")
+def render_global_sidebar(data: AppData) -> None:
+    st.sidebar.title("Finbot")
     st.sidebar.caption(f"Data root: `{data.data_root}`")
 
+
+def render_ops_filters(data: AppData) -> OpsFilters:
     ops = data.ops_catalog
     available_statuses = _unique_values(ops, "status")
     default_statuses = [status for status in available_statuses if status in HEALTHY_STATUSES | ATTENTION_STATUSES]
+    st.sidebar.subheader("Ops Filters")
     statuses = st.sidebar.multiselect(
         "Status",
         options=available_statuses,
         default=default_statuses,
+        key="ops_status",
     )
     discovery_statuses = st.sidebar.multiselect(
         "Discovery",
         options=_unique_values(ops, "discovery_status"),
         default=[],
+        key="ops_discovery",
     )
-    registered_only = st.sidebar.toggle("Registered only", value=False)
-    search = st.sidebar.text_input("Search", value="")
+    registered_only = st.sidebar.toggle("Registered only", value=False, key="ops_registered_only")
+    search = st.sidebar.text_input("Search", value="", key="ops_search")
     return OpsFilters(
         statuses=statuses,
         discovery_statuses=discovery_statuses,
@@ -86,7 +104,7 @@ def render_sidebar(data: AppData) -> OpsFilters:
     )
 
 
-def data_health_page(data: AppData, filters: OpsFilters) -> None:
+def data_health_page(data: AppData) -> None:
     st.title("Data Health")
     st.caption(f"Data root: `{data.data_root}`")
 
@@ -94,6 +112,7 @@ def data_health_page(data: AppData, filters: OpsFilters) -> None:
         st.warning("`ops_catalog.parquet` is missing or empty. Rebuild the catalog after data refreshes.")
         return
 
+    filters = render_ops_filters(data)
     filtered = filter_ops_records(
         data.ops_catalog,
         statuses=filters.statuses,
@@ -157,6 +176,100 @@ def catalog_explorer_page(data: AppData) -> None:
             st.json(row.iloc[0].to_dict())
 
 
+def stock_overview_page(data: AppData) -> None:
+    st.title("Stock Overview")
+    st.caption(f"Data root: `{data.data_root}`")
+
+    tickers = load_ticker_reference(str(data.data_root), data.dataset_catalog)
+    if tickers.empty:
+        st.warning("`reference.tickers` is missing or empty. Rebuild the catalog and ticker reference dataset.")
+        return
+
+    ticker = st.text_input("Ticker", value="AAPL", max_chars=12).strip().upper()
+    if not ticker:
+        st.info("Enter a ticker symbol.")
+        return
+
+    matches = tickers.loc[tickers["ticker"].astype(str).str.upper() == ticker]
+    if matches.empty:
+        st.warning(f"`{ticker}` is not in `reference.tickers`.")
+        return
+    selected = matches.iloc[0]
+
+    range_label = st.segmented_control(
+        "History",
+        options=["1Y", "3Y", "5Y", "10Y", "Max"],
+        default="5Y",
+    )
+    years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10, "Max": None}[str(range_label)]
+
+    render_stock_header(selected)
+
+    prices = filter_history_range(load_price_history(str(data.data_root), data.dataset_catalog, ticker), years)
+    valuations = filter_history_range(load_valuation_history(str(data.data_root), data.dataset_catalog, ticker), years)
+    indicators = load_daily_indicator_info(str(data.data_root))
+
+    render_price_history(ticker, prices)
+    render_valuation_history(valuations, indicators)
+
+
+def render_stock_header(stock: pd.Series) -> None:
+    st.subheader(f"{stock.get('ticker', '')} - {stock.get('name', 'Unknown Company')}")
+    columns = st.columns(5)
+    columns[0].metric("Exchange", format_plain(stock.get("exchange")))
+    columns[1].metric("Sector", format_plain(stock.get("sector")))
+    columns[2].metric("Industry", format_plain(stock.get("industry")))
+    columns[3].metric("Market Cap Scale", format_plain(stock.get("scalemarketcap")))
+    columns[4].metric("Last Price Date", format_plain(stock.get("lastpricedate")))
+
+
+def render_price_history(ticker: str, prices: pd.DataFrame) -> None:
+    st.subheader("Price History")
+    if prices.empty:
+        st.info(f"No price history is available for {ticker}.")
+        return
+
+    chart_column = "closeadj" if "closeadj" in prices.columns else "close"
+    chart_frame = prices.dropna(subset=["date", chart_column]).set_index("date")[[chart_column]]
+    st.line_chart(chart_frame, height=320)
+
+    with st.expander("Price Records", expanded=False):
+        st.dataframe(_display_frame(prices.tail(250), PRICE_DISPLAY_COLUMNS), width="stretch", hide_index=True)
+
+
+def render_valuation_history(valuations: pd.DataFrame, indicators: dict) -> None:
+    st.subheader("Valuation")
+    if valuations.empty:
+        st.info("No daily valuation history is available for this stock.")
+        return
+
+    latest_metrics = latest_valuation_metrics(valuations, indicators)
+    st.dataframe(
+        _format_metric_values(latest_metrics),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "description": st.column_config.TextColumn("description", width="large"),
+        },
+    )
+
+    metric_options = [metric for metric in VALUATION_METRIC_COLUMNS if metric in valuations.columns]
+    selected_metrics = st.multiselect(
+        "Valuation chart metrics",
+        options=metric_options,
+        default=[metric for metric in ["pe", "ps", "pb"] if metric in metric_options],
+        format_func=lambda metric: indicators.get(metric).title if metric in indicators else metric,
+    )
+    if selected_metrics:
+        chart_frame = valuations.dropna(subset=["date"]).set_index("date")[selected_metrics]
+        st.line_chart(chart_frame, height=300)
+
+    with st.expander("Valuation Records", expanded=False):
+        display = valuations.copy()
+        display = display.rename(columns={metric: indicators[metric].title for metric in indicators if metric in display.columns})
+        st.dataframe(_display_frame(display.tail(250), list(display.columns)), width="stretch", hide_index=True)
+
+
 def render_summary(ops: pd.DataFrame) -> None:
     counts = status_counts(ops)
     total = int(len(ops))
@@ -206,7 +319,16 @@ def render_catalog_summary(catalog: pd.DataFrame) -> None:
 def _display_frame(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     available = [column for column in columns if column in frame.columns]
     result = frame[available].copy() if available else frame.copy()
-    for column in ["generated_at_utc", "observed_at_utc", "min_date", "max_date", "latest_date", "provider_max_lastupdated"]:
+    for column in [
+        "date",
+        "lastupdated",
+        "generated_at_utc",
+        "observed_at_utc",
+        "min_date",
+        "max_date",
+        "latest_date",
+        "provider_max_lastupdated",
+    ]:
         if column in result.columns:
             result[column] = result[column].map(format_plain)
     return result
@@ -220,6 +342,13 @@ def _unique_values(frame: pd.DataFrame, column: str) -> list[str]:
     if frame.empty or column not in frame.columns:
         return []
     return sorted(frame[column].dropna().astype(str).unique().tolist())
+
+
+def _format_metric_values(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    if "value" in result.columns:
+        result["value"] = result["value"].map(format_plain)
+    return result
 
 
 STATE_COLUMNS = [
@@ -276,6 +405,18 @@ CATALOG_COLUMNS = [
     "status_reason",
     "parquet_path",
     "metadata_path",
+]
+
+PRICE_DISPLAY_COLUMNS = [
+    "date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "closeadj",
+    "closeunadj",
+    "volume",
+    "lastupdated",
 ]
 
 
