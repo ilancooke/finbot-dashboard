@@ -1,12 +1,11 @@
 [project]
 name = "finbot-dashboard"
 version = "0.1.0"
-description = "A read-only Streamlit dashboard for local Finbot stock research."
+description = "A read-only Streamlit operations dashboard for Finbot filings."
 requires-python = ">=3.11"
 dependencies = [
-    "streamlit",
-    "pandas",
-    "pyarrow",
+    "streamlit>=1.50,<2",
+    "boto3>=1.40,<2",
 ]
 
 [project.optional-dependencies]
@@ -15,5 +14,4 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
 pythonpath = ["."]

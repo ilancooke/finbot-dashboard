@@ -3,3 +3,9 @@ gatherUsageStats = false
 
 [server]
 showEmailPrompt = false
+
+[theme]
+primaryColor = "#245a98"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f5f7fa"
+textColor = "#172738"

@@ -1,136 +1,123 @@
 # finbot-dashboard
 
-A read-only Streamlit dashboard for Finbot data operations and stock research views.
+A read-only Streamlit dashboard for expected earnings and filing acquisition in AWS.
+It reads the data maintained by `finbot-filings`; it does not run acquisition or
+change operational state. The previous local catalog and stock application remains
+in Git history.
 
-The app reads only local catalog files under `FINBOT_DATA_ROOT`. It does not call external APIs,
-download data, mutate datasets, compute features, or orchestrate jobs.
+## Views
 
-## Purpose
+- **Operations:** upcoming earnings, filings needing attention, recent filings and
+  artifacts, and calendar freshness and coverage.
+- **Earnings agenda:** expectations grouped by provider calendar date, alongside
+  recent acquisition activity. Retained past expectations are also browsable.
+- **Filing explorer:** search and filter filings, inspect document checkpoints, and
+  open or download stored original documents through temporary S3 GET links.
 
-This dashboard shows the current state of local Finbot datasets and provides local stock research
-views backed by cataloged parquet datasets.
+All timestamp instants display in **Arizona time (`America/Phoenix`, MST,
+UTC−07:00 year-round)**. Date-only earnings expectations retain the provider's
+market-calendar date; they are not shifted to another day. Before/after-market
+labels refer to the US market session.
 
-The ops pages show:
+All discovered filings and artifact records are included, including unplanned
+documents. Calendar context does not restrict the acquisition inventory. A verified
+ingestion satisfaction checkpoint produces **Matched**; its absence produces
+**Unknown**, since it cannot prove that a document was unplanned. These records
+remain visible in the **Unplanned / unknown** filter.
 
-- Which expected datasets are present or missing.
-- Which datasets are fresh, stale, partial, failed, or unknown.
-- Which datasets are registered versus only discovered by scanning.
-- Latest dataset date, provider update bounds, row counts, entity counts, duplicate key counts,
-  and latest-date coverage where available.
+A qualifying filing can satisfy an expectation before its documents finish
+downloading. Download/storage status and notification publication are shown
+separately. Publication means SNS acknowledged the message; it does not confirm
+downstream receipt or extracted financial results. The dashboard does not extract
+EPS or other financial results.
 
-## Pages
-
-- **Data Health**: status counts, discovery counts, attention table, latest coverage table, and
-  filtered dataset-state records from `ops_catalog.parquet`.
-- **Catalog Explorer**: compact view of `dataset_catalog.parquet`, including paths, ownership,
-  schema metadata, and detailed record JSON.
-- **Stock Overview**: ticker lookup, company metadata, adjusted price history, latest valuation
-  metrics, valuation history charts, and Sharadar metric descriptions.
-
-## Expected Data Layout
-
-```text
-finbot/
-├── data/
-│   └── catalog/
-│       ├── dataset_catalog.parquet
-│       ├── dataset_catalog.json
-│       ├── ops_catalog.parquet
-│       └── ops_catalog.json
-│   ├── fundamentals/
-│   │   └── daily_valuation_metrics.parquet
-│   ├── market/
-│   │   └── daily_bars/
-│   │       └── historical.parquet
-│   ├── reference/
-│   │   └── tickers.parquet
-│   └── temp/
-│       └── SHARADAR-INDICATORS.csv
-└── repos/
-    └── finbot-dashboard/
-```
-
-Rebuild the catalog after data-producing packages add or materially change parquet files:
-
-```bash
-cd /Users/ilan/workspace/finbot/repos/finbot-catalog
-FINBOT_DATA_ROOT=/Users/ilan/workspace/finbot/data \
-.venv/bin/python scripts/build_catalog.py
-```
-
-## Local Run
+## Run locally
 
 From this repository:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-export FINBOT_DATA_ROOT=/Users/ilan/workspace/finbot/data
-streamlit run app.py
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+AWS_PROFILE=default .venv/bin/streamlit run app.py --server.address=127.0.0.1
 ```
 
-If `FINBOT_DATA_ROOT` is not set, the app tries to infer the standard local layout where this
-repo lives at `finbot/repos/finbot-dashboard` and data lives at `finbot/data`.
+Open <http://localhost:8501>. An existing authenticated AWS profile must have read
+access to the source tables and artifacts. Credentials stay in the Python process;
+the browser receives only displayed metadata and document links created on demand.
+No local shared data directory, catalog refresh, dashboard hosting, or CDK deployment
+is needed.
 
-## Docker Run
+## Data and configuration
 
-Build:
+| Source | Use |
+| --- | --- |
+| DynamoDB Companies | Enabled company scope and identity |
+| DynamoDB Calendar | Expectations, sync health, durable satisfaction checkpoints |
+| DynamoDB Filings | Discovery, acceptance, selection and enumeration checkpoints |
+| DynamoDB Artifacts | Documents, storage/publication checkpoints and stage failures |
+| S3 | Original bytes through signed GET links, created only when requested |
+
+The reader uses the [filings data contracts](https://github.com/ilancooke/finbot-filings/blob/main/docs/ARCHITECTURE.md)
+without importing ingestion code. Schema version 1 is supported. Unsupported records,
+missing parents, and inconsistent completion checkpoints are disclosed as unknown.
+Deployment probe records and inactive calendar tombstones are excluded from their
+respective views. Historical errors do not override a completed stage.
+
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `AWS_PROFILE` | SDK credential chain | Local AWS profile; omit when using an IAM role |
+| `AWS_REGION` / `AWS_DEFAULT_REGION` | `us-east-1` | Source region; `AWS_REGION` takes precedence |
+| `FINBOT_DASHBOARD_TABLE_PREFIX` | `finbot-prod` | Reads `<prefix>-companies`, `-calendar`, `-filings`, `-artifacts` |
+| `FINBOT_DASHBOARD_MAX_SCAN_PAGES` | `50` | Maximum pages per table per refresh (1–1000) |
+| `FINBOT_DASHBOARD_CALENDAR_STALE_HOURS` | `48` | Maximum age of a full calendar observation (1–720 hours) |
+| `FINBOT_DASHBOARD_ARTIFACTS_BUCKET` | From each artifact's S3 URI | Optional bucket restriction for signed links |
+
+Minimum AWS permissions are `dynamodb:Scan` on the four tables and `s3:GetObject`
+on the artifact objects. Encrypted objects may also require `kms:Decrypt` on their
+customer-managed key. An existing operator profile can run the app; a dedicated
+dashboard identity should be limited to these reads. No write APIs are used.
+
+Metadata is cached for 60 seconds. **Refresh** clears that cache. The page shows the
+last successful read time; it refreshes on interaction rather than polling in the
+background. If AWS access fails, the current browser session retains its previous
+snapshot with a warning. Document links expire after 15 minutes (or sooner if their
+signing credentials expire); create fresh links when needed.
+
+The current source schema has no global recency index, so this first version uses
+paginated metadata scans, with up to 100 evaluated records per request. The page
+budget bounds read work. Scan projections reduce transferred metadata, not DynamoDB
+read charges. Scans have no chronological ordering and are not an atomic snapshot
+across tables. If a table hits the budget, the UI warns that counts and recent
+activity are incomplete and avoids declaring filing downloads complete.
+
+Time and search filters apply after loading. Recent activity is based on discovery,
+storage, publication and error checkpoints, so newly acquired older filings are
+visible. At larger inventory sizes, add a deliberate read model or index before
+raising scan limits indefinitely.
+
+## Docker
 
 ```bash
 docker build -t finbot-dashboard .
-```
-
-Run:
-
-```bash
-docker run --rm \
-  -p 8501:8501 \
-  -v /path/to/finbot/data:/data \
+docker run --rm -p 127.0.0.1:8501:8501 \
+  -e AWS_PROFILE=default -e AWS_REGION=us-east-1 \
+  -v "$HOME/.aws:/root/.aws:ro" \
   finbot-dashboard
 ```
 
-Inside Docker, `FINBOT_DATA_ROOT` defaults to `/data`. The image contains app code only; data is
-supplied by the mounted host directory.
+Authenticate the host profile first. If it uses SSO, renew its session on the host
+when needed. Forward any dashboard environment overrides with `-e`. Credentials
+are mounted read-only and are never baked into the image. The image contains only
+the application, dependencies and Streamlit settings.
 
-## Data Refresh
-
-The app uses `st.cache_data` for local catalog reads. By default, cached reads expire after 120
-seconds:
-
-```bash
-export FINBOT_DASHBOARD_CACHE_TTL_SECONDS=60
-```
-
-After `finbot-data` writes parquet files and `finbot-catalog` rebuilds the catalog, the dashboard
-sees refreshed data after the cache expires.
-
-## Stock Overview Data
-
-The Stock Overview page resolves its parquet inputs from `dataset_catalog.parquet`:
-
-- `reference.tickers`: stock selector and company metadata.
-- `market.daily_bars.historical`: price history keyed by `symbol` and `date`.
-- `fundamentals.daily_valuation_metrics`: valuation history keyed by `ticker` and `date`.
-
-It also reads `temp/SHARADAR-INDICATORS.csv` for friendly valuation metric names and descriptions.
-All reads are local and filtered to the selected ticker.
-
-## Code Layout
-
-- `app.py`: Streamlit navigation shell and ops pages.
-- `finbot_dashboard/data_loader.py`: data-root resolution, catalog loading, and ops filtering.
-- `finbot_dashboard/stock_data.py`: stock-reference, price-history, valuation-history, and
-  Sharadar indicator loading.
-- `finbot_dashboard/formatting.py`: display formatting helpers.
-- `finbot_dashboard/config.py`: catalog filenames and cache settings.
-
-## Tests
+## Development
 
 ```bash
-pytest
+.venv/bin/python -m compileall app.py finbot_dashboard
+.venv/bin/python -m pytest
 ```
 
-Tests cover data-root resolution, catalog loading, ops loading, status summaries, attention
-records, coverage records, ops filtering, stock dataset path resolution, ticker lookup, price
-history, valuation history, and Sharadar indicator labels.
+Tests use deterministic records, stubbed AWS clients and Streamlit's application
+test runner. They do not contact AWS or mutate the shared data root. Hosting,
+authentication for a shared deployment, and financial-result extraction are later
+decisions.

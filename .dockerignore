@@ -6,3 +6,7 @@ __pycache__
 .DS_Store
 .env
 tests
+ui-mockups
+*.egg-info
+build
+dist
