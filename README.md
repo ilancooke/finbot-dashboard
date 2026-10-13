@@ -31,6 +31,13 @@ separately. Publication means SNS acknowledged the message; it does not confirm
 downstream receipt or extracted financial results. The dashboard does not extract
 EPS or other financial results.
 
+Download and notification totals include all currently recorded files, including
+attachments added by targeted recovery. The ingestion service's original discovery
+count is a historical snapshot; it is not a fixed total. The filing detail explains
+when later records increase that count. Fewer loaded records than the original
+count, incomplete scans, and unsupported or inconsistent checkpoints still show
+**Unknown**, with an explanation in the detail view.
+
 ## Run locally
 
 From this repository:

@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import datetime
 from unittest.mock import Mock
 
@@ -69,3 +70,27 @@ def test_partial_scan_is_prominently_disclosed(snapshot, app):
     assert not app.exception
     assert any("Inventory is incomplete" in warning.value for warning in app.warning)
     assert app.metric[1].value == "1"
+
+
+def test_explorer_explains_later_files_and_current_totals(snapshot, app):
+    snapshot.tables['filings'][0]['enumerated_artifact_count'] = 2
+    original = snapshot.tables['artifacts'][0]
+    for index in (1, 2):
+        child = deepcopy(original)
+        child.update(filename=f'exhibit{index}.htm', artifact_id=original['accession_number'] + f'/exhibit{index}.htm')
+        snapshot.tables['artifacts'].append(child)
+    next(button for button in app.button if button.label == 'Explore filings').click().run()
+    assert not app.exception
+    assert any(text.value == '**Downloads:** 3 of 3 files stored' for text in app.markdown)
+    assert any(text.value == '**Notifications:** 3 of 3 published' for text in app.markdown)
+    assert any('Original discovery recorded 2 files; 1 additional file was recorded later.' == caption.value
+               for caption in app.caption)
+    assert any('AWS SNS accepted' in caption.value for caption in app.caption)
+
+
+def test_explorer_explains_unknown_inventory(snapshot, app):
+    snapshot.tables['filings'][0]['enumerated_artifact_count'] = 2
+    next(button for button in app.button if button.label == 'Explore filings').click().run()
+    assert not app.exception
+    assert any('original discovery recorded 2' in caption.value for caption in app.caption)
+    assert any(text.value == '**Notifications:** Unknown' for text in app.markdown)

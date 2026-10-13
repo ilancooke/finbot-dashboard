@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -37,7 +38,8 @@ def test_all_activity_visible_without_speculative_match(snapshot):
     filings, events, warnings = build_inventory(snapshot)
     assert len(filings) == 1 and filings[0]["Calendar link"] == "Unknown"
     assert filings[0]["Download status"] == "Stored"
-    assert filings[0]["Notifications"] == "1/1 published"
+    assert filings[0]["Downloads"] == "1 of 1 file stored"
+    assert filings[0]["Notifications"] == "1 of 1 published"
     assert not filings[0]["_attention"]
     assert events[0]["Expected date"] == "2026-10-14"
     assert events[0]["Status"] == "No confirmed filing"
@@ -55,7 +57,7 @@ def test_durable_match_and_rescheduled_identity(snapshot):
     assert filings[0]["Calendar link"] == "Matched"
     assert events[0]["Expected date"] == "2026-10-11"
     assert events[0]["Status"] == "Filing found"
-    assert filings[0]["Notifications"] == "0/1 published"
+    assert filings[0]["Notifications"] == "0 of 1 published"
 
 
 @pytest.mark.parametrize("field,value", [
@@ -114,10 +116,56 @@ def test_download_and_publication_states(snapshot, updates, expected):
 
 def test_count_mismatch_and_capped_scans_never_look_complete(snapshot):
     snapshot.tables["filings"][0]["enumerated_artifact_count"] = Decimal("2")
-    assert build_inventory(snapshot)[0][0]["Download status"] == "Unknown"
+    row = build_inventory(snapshot)[0][0]
+    assert row["Download status"] == "Unknown"
+    assert 'Loaded 1 file record; original discovery recorded 2' in row['_status_explanation']
     snapshot.tables["filings"][0]["enumerated_artifact_count"] = Decimal("1")
     snapshot.incomplete_tables = ("artifacts",)
     assert build_inventory(snapshot)[0][0]["Download status"] == "Unknown"
+
+
+@pytest.mark.parametrize('initial,total', [(1, 2), (1, 3), (2, 3)])
+def test_later_recovery_additions_use_current_inventory(snapshot, initial, total):
+    snapshot.tables['filings'][0]['enumerated_artifact_count'] = Decimal(initial)
+    original = snapshot.tables['artifacts'][0]
+    for index in range(1, total):
+        child = deepcopy(original)
+        child.update(filename=f'exhibit{index}.htm', artifact_id=original['accession_number'] + f'/exhibit{index}.htm')
+        snapshot.tables['artifacts'].append(child)
+    row = build_inventory(snapshot)[0][0]
+    assert row['Downloads'] == f'{total} of {total} files stored'
+    assert row['Download status'] == 'Stored'
+    assert row['Notifications'] == f'{total} of {total} published'
+    assert not row['_attention'] and not row['_status_explanation']
+    assert snapshot.tables['filings'][0]['enumerated_artifact_count'] == initial
+
+
+def test_recovery_pending_and_notification_retry_are_visible(snapshot):
+    child = deepcopy(snapshot.tables['artifacts'][0])
+    child.update(filename='recovered.htm', artifact_id=child['accession_number'] + '/recovered.htm',
+                 s3_uri=None, stored_at=None, published_at=None)
+    snapshot.tables['artifacts'].append(child)
+    row = build_inventory(snapshot)[0][0]
+    assert row['Downloads'] == '1 of 2 files stored'
+    assert row['Download status'] == 'Pending'
+    assert row['Notifications'] == '1 of 2 published'
+    child.update(s3_uri='s3://test-artifacts/recovered.htm', stored_at='2026-10-12T15:03:00Z',
+                 failure_stage='PUBLISH', failure_error='SNS unavailable')
+    row = build_inventory(snapshot)[0][0]
+    assert row['Download status'] == 'Stored' and row['_attention']
+    assert row['Notifications'] == '1 of 2 published'
+
+
+@pytest.mark.parametrize('incomplete', [('artifacts',), ('filings',)])
+def test_recovered_files_do_not_hide_incomplete_scans(snapshot, incomplete):
+    child = deepcopy(snapshot.tables['artifacts'][0])
+    child.update(filename='recovered.htm', artifact_id=child['accession_number'] + '/recovered.htm')
+    snapshot.tables['artifacts'].append(child)
+    snapshot.incomplete_tables = incomplete
+    row = build_inventory(snapshot)[0][0]
+    assert row['Download status'] == row['Notifications'] == 'Unknown'
+    assert row['Downloads'] == '2 files stored / total unknown'
+    assert 'inventory read is incomplete' in row['_status_explanation']
 
 
 def test_orphans_and_selection_uncertainty_remain_visible(snapshot):

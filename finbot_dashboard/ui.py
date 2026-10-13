@@ -208,12 +208,22 @@ def filing_detail(filing, settings):
     st.write(f"**Calendar link:** {filing['Calendar link']}")
     if filing["_matches"]:
         st.write(f"**Expected date:** {filing['Expected date']}")
-        st.caption("Verified against the ingestion service's recorded match.")
+        st.caption("The ingestion service linked this filing to the earnings date above.")
     else:
-        st.caption("No verified event-match checkpoint. This may be unplanned activity or an expectation that has not been linked.")
-    st.write(f"**Downloads:** {filing['Downloads']} · {filing['Download status']}")
+        st.caption("No earnings date has been linked to this filing. It may be unplanned, or the link may not have been recorded yet.")
+    download_summary = filing['Downloads']
+    if filing['Download status'] != 'Stored':
+        download_summary += f" · {filing['Download status']}"
+    st.write(f"**Downloads:** {download_summary}")
+    initial_count = count(filing["_parent"].get("enumerated_artifact_count"))
+    additional_count = len(filing["_artifacts"]) - initial_count if initial_count else 0
+    if additional_count > 0:
+        st.caption(f"Original discovery recorded {initial_count} {'file' if initial_count == 1 else 'files'}; "
+                   f"{additional_count} additional {'file was' if additional_count == 1 else 'files were'} recorded later.")
     st.write(f"**Notifications:** {filing['Notifications']}")
-    st.caption("Publication is an SNS acknowledgment, not confirmation of downstream receipt.")
+    st.caption("Published means AWS SNS accepted the notification. Downstream receipt is not verified.")
+    if filing["_status_explanation"]:
+        st.caption(filing["_status_explanation"])
     st.write(f"**Accepted:** {filing['Accepted']}")
     st.write(f"**Discovered:** {filing['Discovered']}")
     source = sec_link(filing["_parent"].get("filing_index_url"))

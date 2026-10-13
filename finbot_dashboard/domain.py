@@ -166,13 +166,26 @@ def build_inventory(snapshot: Snapshot) -> tuple[list[dict], list[dict], list[st
         statuses = [artifact_status(doc) for doc in documents]
         stored = sum(storage == "Stored" for storage, _ in statuses)
         published = sum(notification == "Published" for _, notification in statuses)
-        expected_count = count(parent.get("enumerated_artifact_count"))
+        # This is the first completed discovery snapshot, not a permanent total.
+        # Explicit recovery can add children without rewriting that checkpoint.
+        initial_count = count(parent.get("enumerated_artifact_count"))
+        current_count = max(initial_count, len(documents)) if initial_count is not None else None
         enumerated = bool(instant(parent.get("enumeration_completed_at")))
-        complete = enumerated and expected_count is not None and expected_count == len(documents)
-        unknown = (parent.get("repository_schema_version") != 1 or
-                   "filings" in snapshot.incomplete_tables or "artifacts" in snapshot.incomplete_tables or
-                   any(storage == "Unknown" for storage, _ in statuses) or (enumerated and not complete)
-                   or any(parent.get(key) and not instant(parent[key]) for key in ("filed_at", "enumeration_completed_at", "terminal_at")))
+        complete = enumerated and initial_count is not None and initial_count > 0 and initial_count <= len(documents)
+        unknown_reasons = []
+        if parent.get("repository_schema_version") != 1:
+            unknown_reasons.append("The filing record is missing or has an unsupported schema.")
+        partial_inventory = "filings" in snapshot.incomplete_tables or "artifacts" in snapshot.incomplete_tables
+        if partial_inventory:
+            unknown_reasons.append("The inventory read is incomplete; some files may be missing from this view.")
+        if any(storage == "Unknown" for storage, _ in statuses):
+            unknown_reasons.append("A file has incomplete or unsupported storage or notification data.")
+        if enumerated and not complete:
+            unknown_reasons.append("The original discovery count is missing or invalid." if not initial_count else
+                                   f"Loaded {len(documents)} {'file record' if len(documents) == 1 else 'file records'}; original discovery recorded {initial_count}.")
+        if any(parent.get(key) and not instant(parent[key]) for key in ("filed_at", "enumeration_completed_at", "terminal_at")):
+            unknown_reasons.append("A filing timestamp is invalid.")
+        unknown = bool(unknown_reasons)
         skipped = parent.get("selection_decision") == "EXCLUDE"
         failure = bool(parent.get("terminal_at")) or any("Failed" in pair for pair in statuses)
         retry = (not enumerated and bool(active_error(parent, "ENUMERATE"))) or any("Retrying" in pair for pair in statuses)
@@ -200,12 +213,14 @@ def build_inventory(snapshot: Snapshot) -> tuple[list[dict], list[dict], list[st
             "Company": identity.get("ticker", "Unknown"), "Form": identity.get("form_type", "Unknown"),
             "Calendar link": "Matched" if matched else "Unknown",
             "Expected date": ", ".join(sorted({item["observed_expected_date"] for item in matched})),
-            "Downloads": f"{stored}/{int(expected_count)} stored" if expected_count is not None else f"{stored} stored / total unknown",
+            "Downloads": (f"{stored} of {current_count} {'file' if current_count == 1 else 'files'} stored" if current_count is not None and not partial_inventory
+                          else f"{stored} files stored / total unknown"),
             "Download status": download_state,
-            "Notifications": "Unknown" if unknown else f"{published}/{int(expected_count)} published" if expected_count is not None else "Not ready",
+            "Notifications": "Unknown" if unknown else f"{published} of {current_count} published" if current_count is not None else "Not ready",
             "Accepted": arizona_time(parent.get("filed_at")), "Discovered": arizona_time(identity.get("discovered_at")),
             "Last activity": arizona_time(latest), "Accession": accession,
             "_activity": latest, "_parent": parent, "_artifacts": documents, "_matches": matched,
+            "_status_explanation": " ".join(unknown_reasons),
             "_attention": bool(unknown or failure or retry or download_state == "Selection unresolved") and not skipped,
         }
         result.append(row)
