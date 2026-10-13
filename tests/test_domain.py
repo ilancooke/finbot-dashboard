@@ -1,5 +1,5 @@
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -84,6 +84,64 @@ def test_8k_requires_item_evidence(snapshot):
     assert not valid_match(match, parent)
     match.update(matched_sec_items=["2.02"], sec_item_evidence_source="submissions")
     assert valid_match(match, parent)
+
+
+def v2_checkpoint(snapshot, *, day="2026-10-13", accepted="2026-10-13T10:14:45Z"):
+    match = checkpoint(snapshot)
+    event, parent = snapshot.tables["calendar"][0], snapshot.tables["filings"][0]
+    event["expected_date"] = day
+    parent.update(form_type="8-K", filed_at=accepted)
+    from finbot_dashboard.domain import MARKET
+    expected = datetime.fromisoformat(day).date()
+    start = datetime.combine(expected, datetime.min.time(), MARKET).astimezone(timezone.utc)
+    end = datetime.combine(expected + timedelta(days=1), datetime.min.time(), MARKET).astimezone(timezone.utc)
+    match.update(cik=event_key(event), observed_expected_date=day, matched_form_type="8-K",
+                 matched_filed_at=accepted, satisfied_at=accepted, window_start=start.isoformat(),
+                 window_end=end.isoformat(), grace_end=end.isoformat(), match_reason="original_8_k_item_2_02",
+                 match_policy_version="earnings-satisfaction-v2", matched_sec_items=["2.02"],
+                 sec_item_evidence_source="submissions.recent.items")
+    return match
+
+
+@pytest.mark.parametrize("accepted", ["2026-10-13T10:14:45Z", "2026-10-13T10:28:19Z", "2026-10-13T10:30:38Z"])
+def test_v2_early_filing_links_agenda_to_completed_downloads(snapshot, accepted):
+    snapshot.tables["calendar"].append(v2_checkpoint(snapshot, accepted=accepted))
+    filings, events, warnings = build_inventory(snapshot)
+    assert filings[0]["Calendar link"] == "Matched"
+    assert events[0]["Status"] == "Filing found"
+    assert events[0]["Downloads"] == "1 of 1 file stored"
+    assert events[0]["Accession"] == filings[0]["Accession"]
+    assert not warnings
+
+
+@pytest.mark.parametrize("day,accepted", [
+    ("2026-03-08", "2026-03-09T03:59:59Z"),
+    ("2026-11-01", "2026-11-02T04:59:59Z"),
+])
+def test_v2_dashboard_accepts_daylight_saving_day_bounds(snapshot, day, accepted):
+    match = v2_checkpoint(snapshot, day=day, accepted=accepted)
+    assert valid_match(match, snapshot.tables["filings"][0])
+
+
+@pytest.mark.parametrize("changes", [
+    {"window_start": "2026-10-13T11:30:00Z"},
+    {"window_end": "2026-10-14T05:00:00Z", "grace_end": "2026-10-14T05:00:00Z"},
+    {"grace_end": "2026-10-14T05:00:00Z"},
+    {"observed_expected_date": "2026-10-14"},
+    {"observed_expected_date": "9999-12-31"},
+    {"matched_sec_items": []}, {"sec_item_evidence_source": None},
+    {"match_reason": "any_filing"},
+])
+def test_v2_dashboard_rejects_invalid_bounds_dates_and_evidence(snapshot, changes):
+    match = v2_checkpoint(snapshot)
+    match.update(changes)
+    assert not valid_match(match, snapshot.tables["filings"][0])
+
+
+@pytest.mark.parametrize("accepted", ["2026-10-13T03:59:59Z", "2026-10-14T04:00:00Z"])
+def test_v2_dashboard_does_not_link_adjacent_market_dates(snapshot, accepted):
+    match = v2_checkpoint(snapshot, accepted=accepted)
+    assert not valid_match(match, snapshot.tables["filings"][0])
 
 
 def test_historical_errors_do_not_override_completed_work(snapshot):

@@ -11,7 +11,7 @@ from finbot_dashboard.aws_reader import Snapshot
 
 ARIZONA = ZoneInfo("America/Phoenix")
 MARKET = ZoneInfo("America/New_York")
-MATCH_POLICY = "earnings-satisfaction-v1"
+MATCH_POLICIES = {"earnings-satisfaction-v1", "earnings-satisfaction-v2"}
 
 
 def instant(value) -> datetime | None:
@@ -77,11 +77,17 @@ def valid_match(item, filing) -> bool:
         filed = instant(filing.get("filed_at"))
         start, end, grace = (instant(item.get(key)) for key in ("window_start", "window_end", "grace_end"))
         satisfied = instant(item.get("satisfied_at"))
+        expected = calendar_date(item.get("observed_expected_date"))
+        day_bounds = None
+        if item.get("match_policy_version") == "earnings-satisfaction-v2" and expected:
+            day_start = datetime.combine(expected, datetime.min.time(), MARKET).astimezone(timezone.utc)
+            day_end = datetime.combine(expected + timedelta(days=1), datetime.min.time(), MARKET).astimezone(timezone.utc)
+            day_bounds = (day_start, day_end, day_end)
         reasons = {"10-Q": "original_10_q", "10-K": "original_10_k", "8-K": "original_8_k_item_2_02"}
         return bool(
             item.get("repository_schema_version") == filing.get("repository_schema_version") == 1
             and item.get("calendar_record_type") == "satisfaction"
-            and item.get("match_policy_version") == MATCH_POLICY
+            and item.get("match_policy_version") in MATCH_POLICIES
             and len(identity) == 4 and all(isinstance(part, str) and part for part in identity)
             and item["cik"] == json.dumps(identity, separators=(",", ":"))
             and identity[2] in {"id", "date"}
@@ -90,15 +96,17 @@ def valid_match(item, filing) -> bool:
             and item.get("matched_form_type") == filing.get("form_type")
             and filing.get("form_type") in reasons
             and item.get("match_reason") == reasons.get(filing.get("form_type"))
-            and calendar_date(item.get("observed_expected_date"))
+            and expected
             and (identity[2] != "date" or identity[3] == item.get("observed_expected_date"))
             and filed and filed == instant(item.get("matched_filed_at"))
             and start and end and grace and satisfied
             and start < end <= grace and start <= filed < grace and satisfied >= filed
+            and (item.get("match_policy_version") != "earnings-satisfaction-v2" or
+                 (start, end, grace) == day_bounds)
             and (filing.get("form_type") != "8-K" or
                  ("2.02" in item.get("matched_sec_items", []) and item.get("sec_item_evidence_source")))
         )
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
         return False
 
 

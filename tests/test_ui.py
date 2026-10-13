@@ -8,6 +8,7 @@ from streamlit.testing.v1 import AppTest
 
 from finbot_dashboard import ui
 from conftest import NOW
+from test_domain import v2_checkpoint
 
 
 @pytest.fixture
@@ -36,6 +37,21 @@ def test_operations_agenda_and_explorer_render(app):
     app.button("links:filing:0000000001-26-000001/results.htm").click().run()
     assert not app.exception
     ui.reader.return_value.document_links.assert_called_once()
+
+
+def test_v2_match_shows_filing_and_downloads_in_both_calendar_views(snapshot, app):
+    snapshot.tables["calendar"].append(v2_checkpoint(snapshot))
+    app.run()
+    expected = next(frame.value for frame in app.dataframe if "Status" in frame.value.columns
+                    and "Downloads" in frame.value.columns)
+    assert expected.iloc[0]["Status"] == "Filing found"
+    assert expected.iloc[0]["Downloads"] == "1 of 1 file stored"
+    next(button for button in app.button if button.label == "See earnings agenda").click().run()
+    assert not app.exception
+    expected = next(frame.value for frame in app.dataframe if "Status" in frame.value.columns
+                    and "Downloads" in frame.value.columns)
+    assert expected.iloc[0]["Status"] == "Filing found"
+    assert expected.iloc[0]["Downloads"] == "1 of 1 file stored"
 
 
 def test_search_keeps_unplanned_activity_and_empty_views(app):
