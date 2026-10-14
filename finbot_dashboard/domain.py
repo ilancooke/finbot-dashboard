@@ -11,7 +11,8 @@ from finbot_dashboard.aws_reader import Snapshot
 
 ARIZONA = ZoneInfo("America/Phoenix")
 MARKET = ZoneInfo("America/New_York")
-MATCH_POLICIES = {"earnings-satisfaction-v1", "earnings-satisfaction-v2"}
+MATCH_POLICIES = {"earnings-satisfaction-v1", "earnings-satisfaction-v2", "earnings-satisfaction-v3"}
+DAY_MATCH_POLICIES = {"earnings-satisfaction-v2", "earnings-satisfaction-v3"}
 
 
 def instant(value) -> datetime | None:
@@ -79,11 +80,12 @@ def valid_match(item, filing) -> bool:
         satisfied = instant(item.get("satisfied_at"))
         expected = calendar_date(item.get("observed_expected_date"))
         day_bounds = None
-        if item.get("match_policy_version") == "earnings-satisfaction-v2" and expected:
+        if item.get("match_policy_version") in DAY_MATCH_POLICIES and expected:
             day_start = datetime.combine(expected, datetime.min.time(), MARKET).astimezone(timezone.utc)
             day_end = datetime.combine(expected + timedelta(days=1), datetime.min.time(), MARKET).astimezone(timezone.utc)
             day_bounds = (day_start, day_end, day_end)
-        reasons = {"10-Q": "original_10_q", "10-K": "original_10_k", "8-K": "original_8_k_item_2_02"}
+        reasons = {"10-Q": "original_10_q", "10-K": "original_10_k", "8-K": "original_8_k_item_2_02",
+                   "6-K": "original_6_k_earnings"}
         return bool(
             item.get("repository_schema_version") == filing.get("repository_schema_version") == 1
             and item.get("calendar_record_type") == "satisfaction"
@@ -101,8 +103,16 @@ def valid_match(item, filing) -> bool:
             and filed and filed == instant(item.get("matched_filed_at"))
             and start and end and grace and satisfied
             and start < end <= grace and start <= filed < grace and satisfied >= filed
-            and (item.get("match_policy_version") != "earnings-satisfaction-v2" or
+            and (item.get("match_policy_version") not in DAY_MATCH_POLICIES or
                  (start, end, grace) == day_bounds)
+            and ((filing.get("form_type") == "6-K") == (item.get("match_policy_version") == "earnings-satisfaction-v3"))
+            and (filing.get("form_type") != "6-K" or
+                 (filing.get("selection_policy") == "earnings-acquisition-v3"
+                  and filing.get("selection_decision") == "SELECT"
+                  and filing.get("selection_reason") == "earnings_6_k"
+                  and instant(filing.get("enumeration_completed_at"))
+                  and not filing.get("terminal_at")
+                  and not item.get("matched_sec_items") and item.get("sec_item_evidence_source") is None))
             and (filing.get("form_type") != "8-K" or
                  ("2.02" in item.get("matched_sec_items", []) and item.get("sec_item_evidence_source")))
         )

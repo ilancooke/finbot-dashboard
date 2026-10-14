@@ -25,12 +25,18 @@ ingestion satisfaction checkpoint produces **Matched**; its absence produces
 **Unknown**, since it cannot prove that a document was unplanned. These records
 remain visible in the **Unplanned / unknown** filter.
 
-Both `earnings-satisfaction-v1` and `earnings-satisfaction-v2` checkpoints are
-supported. V1 preserves the recorded polling-window match. V2 requires acceptance
+`earnings-satisfaction-v1`, `earnings-satisfaction-v2` and
+`earnings-satisfaction-v3` checkpoints are supported. V1 preserves the recorded
+polling-window match. V2 requires acceptance
 on the observed expected date in `America/New_York`, with exact midnight-to-midnight
 bounds and no additional grace. This includes early-morning earnings filings and
 handles 23/25-hour daylight-saving dates. Dashboard timestamps still use Arizona
 time. The dashboard displays recorded matches; it does not infer or write them.
+
+V3 is reserved for original earnings 6-Ks and uses the same date bounds. It
+also requires the canonical filing's completed `earnings-acquisition-v3`
+`SELECT` / `earnings_6_k` checkpoint, with no fabricated SEC item evidence.
+Update this reader before delivering the ingestion 6-K release.
 
 A qualifying filing can satisfy an expectation before its documents finish
 downloading. Download/storage status and notification publication are shown

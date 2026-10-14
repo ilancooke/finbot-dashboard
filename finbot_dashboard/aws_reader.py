@@ -14,7 +14,7 @@ COMMON = (
     "discovered_at", "retry_count", "last_error", "last_error_at", "terminal_at",
     "terminal_stage", "terminal_error", "failure_stage", "failure_error", "failure_at",
     "acquisition_failures", "publication_failures", "enumeration_failures",
-    "selection_decision", "selection_reason",
+    "selection_decision", "selection_reason", "selection_policy",
     "pending_work_kind",
 )
 FIELDS = {

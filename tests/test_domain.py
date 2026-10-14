@@ -274,3 +274,43 @@ def test_invalid_metadata_and_external_links():
     assert sec_link("https://example.com/document") is None
     assert sec_link("https://[invalid") is None
     assert sec_link("https://www.sec.gov/Archives/document.htm")
+
+
+def v3_checkpoint(snapshot):
+    match = v2_checkpoint(snapshot)
+    parent = snapshot.tables['filings'][0]
+    parent.update(form_type='6-K', selection_policy='earnings-acquisition-v3',
+                  selection_decision='SELECT', selection_reason='earnings_6_k')
+    match.update(matched_form_type='6-K', match_reason='original_6_k_earnings',
+                 match_policy_version='earnings-satisfaction-v3', matched_sec_items=[])
+    match.pop('sec_item_evidence_source')
+    return match
+
+
+def test_6k_earnings_match_is_displayed_from_completed_selection(snapshot):
+    snapshot.tables['calendar'].append(v3_checkpoint(snapshot))
+    filings, events, warnings = build_inventory(snapshot)
+    assert filings[0]['Calendar link'] == 'Matched' and events[0]['Status'] == 'Filing found'
+    assert not warnings
+
+
+@pytest.mark.parametrize('changes', [
+    {'selection_decision': 'UNRESOLVED'}, {'selection_reason': 'primary_report'},
+    {'selection_policy': 'earnings-acquisition-v2'}, {'enumeration_completed_at': None},
+    {'terminal_at': '2026-10-13T15:00:00Z'}, {'form_type': '6-K/A'},
+])
+def test_6k_matches_require_their_qualified_parent(snapshot, changes):
+    match = v3_checkpoint(snapshot)
+    snapshot.tables['filings'][0].update(changes)
+    assert not valid_match(match, snapshot.tables['filings'][0])
+
+
+@pytest.mark.parametrize('changes', [
+    {'match_policy_version': 'earnings-satisfaction-v2'}, {'matched_sec_items': ['2.02']},
+    {'sec_item_evidence_source': 'submissions.recent.items'},
+    {'grace_end': '2026-10-14T05:00:00Z'}, {'match_reason': 'original_10_q'},
+])
+def test_6k_does_not_borrow_item_evidence_or_legacy_matching(snapshot, changes):
+    match = v3_checkpoint(snapshot)
+    match.update(changes)
+    assert not valid_match(match, snapshot.tables['filings'][0])
